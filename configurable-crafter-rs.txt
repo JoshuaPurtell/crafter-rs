@@ -1,0 +1,172 @@
+Configurable Crafter-RS: Review + Proposal
+=========================================
+
+Scope
+- Review customizability patterns in ContinualLearningBench (CLB)
+- Review current customizability in crafter-rs
+- Propose how to add CLB-style configurability to crafter-rs, including a session create API, TOML/TUI configuration, classic mode variants, and craftax-partial variants
+
+1) ContinualLearningBench (CLB) Customizability Review
+------------------------------------------------------
+What CLB is aiming for (and documents in goals/implementation_plan):
+- Patch-based customization: game behavior changes via patches applied before env creation.
+- YAML config system with presets + overrides:
+  - Loader merges base config + per-world overrides.
+  - Pydantic models validate config structure.
+- Multiple modes:
+  - crafter_classic (classic, no addons)
+  - craftax_addon (new mobs/items/combat/worldgen/achievements)
+- Modular config domains (examples in goals.txt / implementation_plan.txt):
+  - player_survival (hunger/thirst/fatigue/health thresholds and rates)
+  - terrain_generation (noise params, thresholds, spawn multipliers)
+  - npc_ai (behavior modes, enable/disable)
+  - chunk_balancing, physics, achievements
+  - mars_rules (counter-commonsense rules)
+- Service layer supports passing config + mode via request config (seed, world_config_path, mode).
+
+Takeaway: CLB treats customization as a first-class, mode-driven config system that is validated, composable, and applied via patches before creating the core environment. The intent is that “classic” remains intact and “craftax_addon” is opt-in and toggleable.
+
+2) crafter-rs Customizability Review
+------------------------------------
+Current customizability is present, but narrower and partially wired:
+- SessionConfig in `crafter-rs/src/config.rs` exposes many parameters:
+  - world size, seed, chunk size
+  - density multipliers (tree/coal/iron/diamond/cow/zombie/skeleton)
+  - spawn/despawn rates (zombie/cow)
+  - day/night cycle and period
+  - hunger/thirst/fatigue toggles
+  - damage multipliers and mob health
+  - view radius/full world state
+  - time mode
+- SessionConfig presets exist: fast_training, human_play, easy, hard.
+- Snapshot API (SnapshotManager) supports resuming by session_id and optional seed/view_size, but does not accept a full config.
+- TUI offers a config menu for tick rate, world size, seed, graphics mode, logical time, but does not persist to disk or support loading profiles.
+- RewardConfig exists and is configurable in code but is not surfaced in Snapshot/TUI/config loading.
+
+Gaps / risks in crafter-rs (customizability):
+- Some SessionConfig fields are not applied:
+  - worldgen does not use tree/coal/iron/diamond/cow/zombie/skeleton density multipliers.
+  - player hunger_rate and thirst_rate are not used in entity.update_life_stats (hardcoded 25/20 thresholds).
+- No structured config loading from file (TOML/JSON/YAML).
+- SnapshotManager can’t create sessions from explicit configs.
+- No explicit mode system (classic vs variants vs craftax-partial).
+- TUI settings are ephemeral and do not map cleanly to SessionConfig / profiles.
+
+3) Proposal: Add CLB-Style Configurability to crafter-rs
+--------------------------------------------------------
+A) Configuration model (TOML + mergeable presets)
+- Introduce a top-level config model with merge support:
+  - `GameConfig` (or expand SessionConfig) with sub-sections for:
+    - worldgen (noise params, thresholds, spawn multipliers)
+    - survival (rates, thresholds, enable/disable)
+    - combat (damage multipliers, weapon behavior)
+    - mobs (spawn rules, AI modes)
+    - achievements (enable/disable sets, custom definitions)
+    - rewards (RewardConfig)
+  - `mode = "classic" | "classic_variant" | "craftax_partial"`
+  - `base = "classic" | "classic_easy" | "classic_hard" | ...`
+- Default behavior: no config provided => classic preset with current Crafter parity.
+- TOML loading + merge:
+  - `configs/classic.toml` (default)
+  - `configs/classic_easy.toml`
+  - `configs/classic_hard.toml`
+  - `configs/craftax_partial.toml`
+  - `configs/craftax_partial_<variant>.toml`
+- Suggested API:
+  - `GameConfig::from_toml(path)`
+  - `GameConfig::merge(base, override)`
+  - `SessionConfig::from_game_config(game_config)`
+
+B) Session create API (for agents + external clients)
+- Extend SnapshotManager to support explicit configs:
+  - Add to SnapshotRequest:
+    - `config_name: Option<String>`
+    - `config_inline: Option<GameConfig>` or `config_toml: Option<String>`
+  - Or introduce a dedicated creation endpoint:
+    - `create_session(config_name | config_inline) -> session_id`
+- Keep backward compatibility by defaulting to classic preset when no config is provided.
+- Enforce that any non-classic behavior only activates via explicit config flags.
+- Return config metadata in SnapshotResponse (mode, config_name, seed).
+
+C) Wire SessionConfig fields into actual mechanics
+- worldgen: apply density multipliers for terrain/material/object spawn probabilities.
+- survival: use hunger_rate, thirst_rate, and configurable thresholds in update_life_stats.
+- combat: ensure player_damage_mult is applied to sword damage (currently only mob damage multipliers are used).
+- achievements: support disable/enable sets or custom definitions via config.
+
+D) TUI configuration (TOML + profiles)
+- Load config at startup:
+  - `~/.config/crafter/config.toml` (default profile)
+  - Allow per-profile files `~/.config/crafter/profiles/*.toml`.
+- Config menu should:
+  - Select a profile
+  - Apply overrides (seed, world size, time mode, graphics mode)
+  - Save back to config file if changed
+- Use the same config structs as the core engine to avoid divergence.
+
+4) Mode Design: Classic + Classic Variants
+------------------------------------------
+Classic mode:
+- Mode = "classic" in config
+- All gameplay matches current Python Crafter behavior
+- If no config is provided, this is the behavior (classic preset + parity tests)
+
+Classic variants (examples; driven by config presets):
+- classic_easy: reduced mob damage, slower hunger/thirst, higher resource densities
+- classic_hard: increased mob damage, faster hunger/thirst, lower diamond density
+- classic_sparse: low resource density + fewer cows
+- classic_survival_off: hunger/thirst/fatigue disabled (training-friendly)
+
+These can map to existing SessionConfig presets but should be named/configurable via TOML profiles to align with CLB-style usage.
+
+5) Mode Design: Craftax-Partial + Variants
+-------------------------------------------
+Craftax-partial is a middle ground: it introduces some Craftax features while staying compatible with the core Crafter rules. This should be a structured config rather than a hard fork.
+
+Suggested craftax-partial feature toggles (config section):
+- mobs: enable additional mobs (e.g., orc, troll, bat) and per-mob behaviors
+- items: enable new ores/materials (sapphire, ruby)
+- combat: enable ranged weapons (bow/arrow) + armor tiers
+- worldgen: spawn rules for new materials/entities
+- achievements: craftax-specific achievements (optional)
+
+Craftax-partial variants (examples):
+- craftax_partial_basic: only new mobs + basic ranged combat
+- craftax_partial_loot: adds chests/loot tables and potions
+- craftax_partial_progression: adds XP/level system
+- craftax_partial_full: enables all Craftax-partial features
+
+Implementation approach:
+- Keep the core “classic” code path intact.
+- Add feature-gated modules for craftax extensions (worldgen + entities + combat + achievements).
+- Use config toggles to activate subsets, and guard determinism.
+
+6) Minimal Step-by-Step Implementation Plan
+-------------------------------------------
+1. Config loading: add TOML support + `GameConfig` / merge rules.
+2. Session create API: extend SnapshotManager or add SessionManager with explicit config creation.
+3. Wire unused config fields into worldgen + survival update.
+4. Add config profiles + TUI load/save.
+5. Add mode enum + classic variants from presets.
+6. Add craftax-partial feature flags + scaffold modules (keep craftax code in a separate folder, e.g., `src/craftax/`).
+7. Add tests for determinism: same config + seed => same world.
+
+7) Replayability and Determinism Constraints
+--------------------------------------------
+Replay/recording in crafter-rs assumes deterministic simulation given identical config + seed and action sequence. That imposes these constraints on any new additions (especially craftax-partial):
+- All randomness must come from the session RNG (or worldgen RNG) seeded from config; avoid `thread_rng()` in gameplay logic.
+- Avoid nondeterministic iteration order: don’t rely on `HashMap` iteration for AI/spawns/loot order; sort by id or use ordered containers when order matters for RNG calls.
+- Real-time/hybrid modes should not affect gameplay state progression during replay; replay should run in logical mode only.
+- Any new feature flags or parameters must be captured in the recorded config (so replay creates an equivalent session).
+- Worldgen changes must preserve deterministic terrain and spawn placement for a given seed/config.
+
+8) Testing and Validation Ideas
+-------------------------------
+- Determinism: same config + seed => identical terrain and spawns.
+- Mode invariants: classic preset matches current test snapshots.
+- Config coverage: ensure every config field influences behavior (no dead fields).
+- Snapshot API: create session with config, then resume by session_id.
+
+Notes
+- This proposal mirrors CLB’s patch-based customization but maps to Rust’s config-driven architecture rather than runtime monkey patching.
+- The most urgent gap is wiring existing SessionConfig fields into worldgen/survival so users can actually customize what the API already promises.
