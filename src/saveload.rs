@@ -84,6 +84,10 @@ impl SaveData {
         }
     }
 
+    pub fn into_session(self) -> Session {
+        session_from_save_data(self)
+    }
+
     /// Save to a JSON file
     pub fn save_json<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
         let file = File::create(path)?;

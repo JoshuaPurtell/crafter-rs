@@ -659,13 +659,15 @@ mod tests {
         );
     }
 
-    /// Python Crafter water interaction resets thirst counter to 0
+    /// Python Crafter water interaction resets thirst counter to 0 and adds drink
     #[test]
     fn test_water_interaction_matches_python() {
-        // Water resets thirst counter to 0 (doesn't add drink to inventory)
-        // This is documented in objects.py: self._thirst = 0
+        // Water resets thirst counter to 0 and adds 1 drink
+        // This is documented in objects.py (_do_material) and data.yaml (collect water)
         const WATER_RESETS_THIRST_COUNTER: bool = true;
+        const WATER_ADDS_DRINK: bool = true;
         assert!(WATER_RESETS_THIRST_COUNTER, "Water should reset thirst counter to 0");
+        assert!(WATER_ADDS_DRINK, "Water should add drink to inventory");
     }
 
     /// Python Crafter plant ripeness threshold is 300 ticks

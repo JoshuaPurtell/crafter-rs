@@ -3,7 +3,7 @@
 use crate::action::Action;
 use crate::achievement::Achievements;
 use crate::config::SessionConfig;
-use crate::entity::{Arrow, GameObject, Mob, Plant, Position};
+use crate::entity::{Arrow, DamageSource, GameObject, Mob, Plant, Position};
 use crate::inventory::Inventory;
 use crate::material::Material;
 use crate::world::{World, WorldView};
@@ -277,9 +277,19 @@ impl Session {
         let mut debug_events = Vec::new();
 
         // Capture state before action for debugging
-        let (drink_before, food_before, energy_before, sleeping_before) = self.world.get_player()
-            .map(|p| (p.inventory.drink, p.inventory.food, p.inventory.energy, p.sleeping))
-            .unwrap_or((0, 0, 0, false));
+        let (drink_before, food_before, energy_before, sleeping_before, health_before) = self
+            .world
+            .get_player()
+            .map(|p| {
+                (
+                    p.inventory.drink,
+                    p.inventory.food,
+                    p.inventory.energy,
+                    p.sleeping,
+                    p.inventory.health,
+                )
+            })
+            .unwrap_or((0, 0, 0, false, 0));
 
         // Update daylight
         if self.config.day_night_cycle {
@@ -358,8 +368,31 @@ impl Session {
         // Spawn/despawn mobs
         self.spawn_despawn_mobs();
 
+        // Log damage taken this tick with a cause when available.
+        if let Some(player) = self.world.get_player() {
+            if player.inventory.health < health_before {
+                let cause = player
+                    .last_damage_source
+                    .map(|source| source.label())
+                    .unwrap_or("unknown");
+                debug_events.push(format!(
+                    "DAMAGE: {} -> {} (cause: {})",
+                    health_before, player.inventory.health, cause
+                ));
+            }
+        }
+
         // Check for game over conditions
         let (done, done_reason) = self.check_done();
+        if matches!(done_reason, Some(DoneReason::Death)) {
+            let cause = self
+                .world
+                .get_player()
+                .and_then(|p| p.last_damage_source)
+                .map(|source| source.label())
+                .unwrap_or("unknown");
+            debug_events.push(format!("Death cause: {}", cause));
+        }
 
         // Calculate rewards
         let (reward, newly_unlocked) = self.calculate_rewards();
@@ -434,6 +467,7 @@ impl Session {
                 if let Some(mat) = self.world.get_material(new_pos) {
                     if mat.is_deadly() {
                         if let Some(player) = self.world.get_player_mut() {
+                            player.last_damage_source = Some(DamageSource::Lava);
                             player.inventory.health = 0;
                         }
                     }
@@ -586,12 +620,10 @@ impl Session {
                 }
             }
             Material::Water => {
-                // Drinking water restores drink and resets thirst counter
-                // Set to -19 so after life_stats adds 1.0, it's -18 (well below 20 threshold)
-                // This gives ~38 ticks before drink decrements again
+                // Python Crafter: drinking water resets thirst counter and adds 1 drink.
                 if let Some(p) = self.world.get_player_mut() {
-                    p.thirst_counter = -19.0;
-                    p.inventory.drink = crate::inventory::MAX_INVENTORY_VALUE;
+                    p.thirst_counter = 0.0;
+                    p.inventory.add_drink(1);
                     p.achievements.collect_drink += 1;
                 }
             }
@@ -887,25 +919,14 @@ impl Session {
         player_pos: Position,
         player_sleeping: bool,
     ) {
-        zombie.tick_cooldown();
-
         let dist =
             (zombie.pos.0 - player_pos.0).abs() + (zombie.pos.1 - player_pos.1).abs();
 
         // First: movement (chase or random)
         if dist <= 8 && self.rng.gen::<f32>() < 0.9 {
-            // Move towards player (80% accuracy like Python Crafter)
-            let toward_accurate = self.rng.gen::<f32>() < 0.8;
-            let (dx, dy) = if toward_accurate {
-                (
-                    (player_pos.0 - zombie.pos.0).signum(),
-                    (player_pos.1 - zombie.pos.1).signum(),
-                )
-            } else {
-                // Random direction when not accurate
-                let directions = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-                directions[self.rng.gen_range(0..4)]
-            };
+            // Move towards player (80% long-axis, 20% short-axis like Python)
+            let long_axis = self.rng.gen::<f32>() < 0.8;
+            let (dx, dy) = self.toward_direction(zombie.pos, player_pos, long_axis);
 
             let new_pos = (zombie.pos.0 + dx, zombie.pos.1 + dy);
             if self.world.is_walkable(new_pos) && self.world.get_object_at(new_pos).is_none() {
@@ -936,7 +957,7 @@ impl Session {
                 let damage = (base_damage as f32 * self.config.zombie_damage_mult) as u8;
 
                 if let Some(player) = self.world.get_player_mut() {
-                    player.take_damage(damage);
+                    player.apply_damage(DamageSource::Zombie, damage);
                     if player_sleeping {
                         player.wake_up();
                     }
@@ -951,11 +972,29 @@ impl Session {
         }
     }
 
+    fn toward_direction(&self, from: Position, to: Position, long_axis: bool) -> (i32, i32) {
+        let dx = to.0 - from.0;
+        let dy = to.1 - from.1;
+        let dist_x = dx.abs();
+        let dist_y = dy.abs();
+
+        let choose_x = if long_axis {
+            dist_x > dist_y
+        } else {
+            dist_x <= dist_y
+        };
+
+        if choose_x {
+            (dx.signum(), 0)
+        } else {
+            (0, dy.signum())
+        }
+    }
+
     /// Skeleton AI - matching Python Crafter behavior:
     /// - Retreat (flee) when player within 3 tiles (60% accuracy toward player, then negate)
     /// - Shoot at 50% probability when player within 5 tiles
     /// - Chase at 30% probability when player within 8 tiles
-    /// - Random movement at 20% probability otherwise
     fn process_skeleton_ai(
         &mut self,
         id: u32,
@@ -968,18 +1007,10 @@ impl Session {
 
         // Priority 1: Retreat if player too close (dist <= 3)
         if dist <= 3 {
-            // Calculate direction away from player (60% accuracy like Python)
-            let toward_accurate = self.rng.gen::<f32>() < 0.6;
-            let (dx, dy) = if toward_accurate {
-                (
-                    -(player_pos.0 - skeleton.pos.0).signum(),
-                    -(player_pos.1 - skeleton.pos.1).signum(),
-                )
-            } else {
-                // Random direction when not accurate
-                let directions = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-                directions[self.rng.gen_range(0..4)]
-            };
+            // Calculate direction away from player (60% long-axis, 40% short-axis)
+            let long_axis = self.rng.gen::<f32>() < 0.6;
+            let (dx, dy) = self.toward_direction(skeleton.pos, player_pos, long_axis);
+            let (dx, dy) = (-dx, -dy);
 
             let new_pos = (skeleton.pos.0 + dx, skeleton.pos.1 + dy);
             if self.world.is_walkable(new_pos) && self.world.get_object_at(new_pos).is_none() {
@@ -994,8 +1025,9 @@ impl Session {
 
         // Priority 2: Shoot at 50% probability when in range (dist <= 5)
         if dist <= 5 && skeleton.can_shoot() && self.rng.gen::<f32>() < 0.5 {
-            let dx = (player_pos.0 - skeleton.pos.0).signum() as i8;
-            let dy = (player_pos.1 - skeleton.pos.1).signum() as i8;
+            let (dx, dy) = self.toward_direction(skeleton.pos, player_pos, true);
+            let dx = dx as i8;
+            let dy = dy as i8;
 
             // Shoot toward player
             let arrow_pos = (
@@ -1007,24 +1039,16 @@ impl Session {
             skeleton.reset_reload();
         // Priority 3: Chase at 30% probability when in range (dist <= 8)
         } else if dist <= 8 && self.rng.gen::<f32>() < 0.3 {
-            // Move toward player (60% accuracy like Python)
-            let toward_accurate = self.rng.gen::<f32>() < 0.6;
-            let (dx, dy) = if toward_accurate {
-                (
-                    (player_pos.0 - skeleton.pos.0).signum(),
-                    (player_pos.1 - skeleton.pos.1).signum(),
-                )
-            } else {
-                let directions = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-                directions[self.rng.gen_range(0..4)]
-            };
+            // Move toward player (60% long-axis, 40% short-axis)
+            let long_axis = self.rng.gen::<f32>() < 0.6;
+            let (dx, dy) = self.toward_direction(skeleton.pos, player_pos, long_axis);
 
             let new_pos = (skeleton.pos.0 + dx, skeleton.pos.1 + dy);
             if self.world.is_walkable(new_pos) && self.world.get_object_at(new_pos).is_none() {
                 self.world.move_object(id, new_pos);
             }
-        // Priority 4: Random movement at 20% probability
         } else if self.rng.gen::<f32>() < 0.2 {
+            // Random movement when idle (matching Python Crafter)
             let directions = [(0, 1), (0, -1), (1, 0), (-1, 0)];
             let dir = directions[self.rng.gen_range(0..4)];
             let new_pos = (skeleton.pos.0 + dir.0, skeleton.pos.1 + dir.1);
@@ -1070,7 +1094,7 @@ impl Session {
                 if next_pos == player.pos {
                     let damage = (2.0 * self.config.arrow_damage_mult) as u8;
                     if let Some(p) = self.world.get_player_mut() {
-                        p.take_damage(damage);
+                        p.apply_damage(DamageSource::Arrow, damage);
                         if p.sleeping {
                             p.wake_up();
                         }
@@ -1967,6 +1991,142 @@ mod tests {
 mod mechanics_tests {
     use super::*;
     use crate::entity::{Cow, Zombie, Skeleton, Plant, Arrow, GameObject};
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    fn neighbors_with_actions(pos: Position) -> [(Position, Action); 4] {
+        [
+            ((pos.0 - 1, pos.1), Action::MoveLeft),
+            ((pos.0 + 1, pos.1), Action::MoveRight),
+            ((pos.0, pos.1 - 1), Action::MoveUp),
+            ((pos.0, pos.1 + 1), Action::MoveDown),
+        ]
+    }
+
+    fn actions_to_water() -> (u64, Vec<Action>, Position, Position) {
+        let seed = 0;
+        let actions = vec![
+            Action::MoveLeft,
+            Action::MoveLeft,
+            Action::MoveLeft,
+            Action::MoveLeft,
+            Action::MoveLeft,
+            Action::MoveLeft,
+            Action::MoveLeft,
+        ];
+
+        let config = SessionConfig {
+            world_size: (32, 32),
+            seed: Some(seed),
+            ..Default::default()
+        };
+        let mut session = Session::new(config);
+        let start = session.get_state().player_pos;
+        for action in &actions {
+            session.step(*action);
+        }
+        let stand_pos = session.get_state().player_pos;
+        let water_pos = neighbors_with_actions(stand_pos)
+            .into_iter()
+            .find_map(|(pos, _)| {
+                (session.world.get_material(pos) == Some(Material::Water)).then_some(pos)
+            })
+            .expect("Expected water adjacent to stand_pos");
+
+        assert_ne!(start, stand_pos);
+        (seed, actions, stand_pos, water_pos)
+    }
+
+    fn find_cow_actions(max_seed: u64, max_steps: usize) -> (u64, Vec<Action>) {
+        let action_options = [
+            Action::MoveLeft,
+            Action::MoveRight,
+            Action::MoveUp,
+            Action::MoveDown,
+        ];
+
+        for seed in 0..max_seed {
+            let config = SessionConfig {
+                world_size: (32, 32),
+                seed: Some(seed),
+                ..Default::default()
+            };
+            let session = Session::new(config.clone());
+            let player_pos = session.get_state().player_pos;
+            let mut goals = Vec::new();
+
+            for obj in session.world.objects.values() {
+                if let GameObject::Cow(cow) = obj {
+                    for (adj_pos, _) in neighbors_with_actions(cow.pos) {
+                        if session.world.is_walkable(adj_pos) {
+                            goals.push(adj_pos);
+                        }
+                    }
+                }
+            }
+
+            if goals.is_empty() {
+                continue;
+            }
+
+            let mut queue = VecDeque::new();
+            let mut visited = HashSet::new();
+            let mut parents: HashMap<Position, (Position, Action)> = HashMap::new();
+            let mut depths: HashMap<Position, usize> = HashMap::new();
+            queue.push_back(player_pos);
+            visited.insert(player_pos);
+            depths.insert(player_pos, 0);
+
+            while let Some(pos) = queue.pop_front() {
+                let depth = *depths.get(&pos).unwrap_or(&0);
+                if goals.contains(&pos) {
+                    let mut actions = Vec::new();
+                    let mut current = pos;
+                    while current != player_pos {
+                        let (prev, action) = parents[&current];
+                        actions.push(action);
+                        current = prev;
+                    }
+                    actions.reverse();
+                    if actions.len() > max_steps {
+                        continue;
+                    }
+
+                    let mut sim = Session::new(config.clone());
+                    for action in &actions {
+                        sim.step(*action);
+                    }
+                    let stand_pos = sim.get_state().player_pos;
+                    let cow_pos = neighbors_with_actions(stand_pos)
+                        .into_iter()
+                        .find_map(|(pos, _)| match sim.world.get_object_at(pos) {
+                            Some(GameObject::Cow(_)) => Some(pos),
+                            _ => None,
+                        });
+                    if cow_pos.is_some() {
+                        return (seed, actions);
+                    }
+                }
+
+                if depth >= max_steps {
+                    continue;
+                }
+
+                for action in action_options {
+                    if let Some((dx, dy)) = action.movement_delta() {
+                        let next_pos = (pos.0 + dx, pos.1 + dy);
+                        if !visited.contains(&next_pos) && session.world.is_walkable(next_pos) {
+                            visited.insert(next_pos);
+                            parents.insert(next_pos, (pos, action));
+                            depths.insert(next_pos, depth + 1);
+                            queue.push_back(next_pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        panic!("No seed found with reachable cow within search bounds");
+    }
 
     // ==================== VITALS / LIFE STATS ====================
 
@@ -2100,7 +2260,84 @@ mod mechanics_tests {
     }
 
     #[test]
-    fn test_drinking_water_restores_drink() {
+    fn test_navigate_to_water_and_drink_increases_drink() {
+        let (seed, actions, stand_pos, water_pos) = actions_to_water();
+
+        let config = SessionConfig {
+            world_size: (32, 32),
+            seed: Some(seed),
+            thirst_enabled: true,
+            ..Default::default()
+        };
+        let mut session = Session::new(config);
+
+        if let Some(player) = session.world.get_player_mut() {
+            player.inventory.drink = 3;
+            player.thirst_counter = 0.0;
+        }
+
+        for action in actions {
+            session.step(action);
+        }
+
+        assert_eq!(session.get_state().player_pos, stand_pos);
+
+        if let Some(player) = session.world.get_player_mut() {
+            player.facing = (
+                (water_pos.0 - stand_pos.0) as i8,
+                (water_pos.1 - stand_pos.1) as i8,
+            );
+        }
+
+        let drink_before = session.get_state().inventory.drink;
+        let result = session.step(Action::Do);
+        assert_eq!(result.state.inventory.drink, drink_before + 1);
+    }
+
+    #[test]
+    fn test_navigate_to_cow_and_eat_increases_food() {
+        let (seed, actions) = find_cow_actions(200, 10);
+
+        let config = SessionConfig {
+            world_size: (32, 32),
+            seed: Some(seed),
+            hunger_enabled: true,
+            ..Default::default()
+        };
+        let mut session = Session::new(config);
+
+        if let Some(player) = session.world.get_player_mut() {
+            player.inventory.food = 1;
+        }
+
+        for action in actions {
+            session.step(action);
+        }
+
+        let stand_pos = session.get_state().player_pos;
+        let cow_pos = neighbors_with_actions(stand_pos)
+            .into_iter()
+            .find_map(|(pos, _)| match session.world.get_object_at(pos) {
+                Some(GameObject::Cow(_)) => Some(pos),
+                _ => None,
+            })
+            .expect("Expected cow adjacent after action sequence");
+
+        if let Some(player) = session.world.get_player_mut() {
+            player.facing = (
+                (cow_pos.0 - stand_pos.0) as i8,
+                (cow_pos.1 - stand_pos.1) as i8,
+            );
+            player.inventory.iron_sword = 1;
+        }
+
+        let food_before = session.get_state().inventory.food;
+        let result = session.step(Action::Do);
+        assert_eq!(result.state.inventory.food, food_before + 6);
+    }
+
+    #[test]
+    fn test_drinking_water_adds_drink() {
         let config = SessionConfig {
             world_size: (64, 64),
             seed: Some(12345),
@@ -2133,7 +2370,7 @@ mod mechanics_tests {
         }
 
         let result = session.step(Action::Do);
-        assert_eq!(result.state.inventory.drink, 9, "Drink should be restored to 9");
+        assert_eq!(result.state.inventory.drink, 4, "Drink should increase by 1");
         assert!(result.state.achievements.collect_drink > 0, "Should unlock collect_drink");
     }
 
@@ -2903,12 +3140,12 @@ mod mechanics_tests {
         }
 
         let result = session.step(Action::Do);
-        assert_eq!(result.state.inventory.drink, 9, "Drink should be restored");
+        assert_eq!(result.state.inventory.drink, 4, "Drink should increase by 1");
 
-        // Verify it stays at 9
+        // Verify it doesn't decay immediately
         for _ in 0..10 {
             let result = session.step(Action::Noop);
-            assert_eq!(result.state.inventory.drink, 9, "Drink should stay at 9");
+            assert_eq!(result.state.inventory.drink, 4, "Drink should stay at 4");
         }
     }
 

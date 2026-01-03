@@ -179,6 +179,16 @@ impl RecordingSession {
         }
     }
 
+    /// Create a recording session from an existing session state
+    pub fn from_session(session: Session, options: RecordingOptions) -> Self {
+        let recording = Recording::new(session.config.clone(), session.episode);
+        Self {
+            session,
+            recording,
+            options,
+        }
+    }
+
     /// Take a step and record it
     pub fn step(&mut self, action: Action) -> StepResult {
         // Check max steps
@@ -316,6 +326,10 @@ impl ReplaySession {
     /// Get current game state
     pub fn get_state(&self) -> GameState {
         self.session.get_state()
+    }
+
+    pub fn session(&self) -> &Session {
+        &self.session
     }
 }
 

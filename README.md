@@ -44,6 +44,20 @@ loop {
 }
 ```
 
+## Interactive TUI
+
+Run the standalone Crafter TUI from this repo:
+
+```bash
+cargo run -p crafter-tui
+```
+
+OpenTUI requires Zig 0.14.x on your PATH. If you have the Mission Control repo locally, you can use its bundled Zig:
+
+```bash
+PATH=/Users/joshpurtell/Documents/GitHub/mission-control/vendor/zig-0.14.0:$PATH cargo run -p crafter-tui
+```
+
 ## Modules
 
 - `session` - Game session management and main loop

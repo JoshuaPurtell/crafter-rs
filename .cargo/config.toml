@@ -1,0 +1,2 @@
+[env]
+ZIG_BIN = "/Users/joshpurtell/Documents/GitHub/mission-control/vendor/zig-0.14.0/zig"

@@ -3,7 +3,7 @@
 use crate::entity::{GameObject, ObjectId, Position};
 use crate::material::Material;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// The game world containing terrain and objects
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,7 +15,7 @@ pub struct World {
     pub materials: Vec<Material>,
 
     /// All game objects by ID
-    pub objects: HashMap<ObjectId, GameObject>,
+    pub objects: BTreeMap<ObjectId, GameObject>,
 
     /// Position to object ID mapping for fast lookup
     pub object_positions: HashMap<Position, ObjectId>,
@@ -39,7 +39,7 @@ impl World {
         Self {
             area: (width, height),
             materials: vec![Material::Grass; (width * height) as usize],
-            objects: HashMap::new(),
+            objects: BTreeMap::new(),
             object_positions: HashMap::new(),
             daylight: 0.5,
             rng_seed: seed,

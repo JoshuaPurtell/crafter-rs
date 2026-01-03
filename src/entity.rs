@@ -105,6 +105,35 @@ pub struct Player {
     pub fatigue_counter: i32,
     pub recover_counter: f32,
     pub last_health: u8,
+    #[serde(default)]
+    pub last_damage_source: Option<DamageSource>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum DamageSource {
+    Zombie,
+    Skeleton,
+    Arrow,
+    Lava,
+    Starvation,
+    Thirst,
+    Exhaustion,
+    Unknown,
+}
+
+impl DamageSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            DamageSource::Zombie => "zombie",
+            DamageSource::Skeleton => "skeleton",
+            DamageSource::Arrow => "arrow",
+            DamageSource::Lava => "lava",
+            DamageSource::Starvation => "starvation",
+            DamageSource::Thirst => "thirst",
+            DamageSource::Exhaustion => "exhaustion",
+            DamageSource::Unknown => "unknown",
+        }
+    }
 }
 
 impl Default for Player {
@@ -127,6 +156,7 @@ impl Player {
             fatigue_counter: 0,
             recover_counter: 0.0,
             last_health: 9,
+            last_damage_source: None,
         }
     }
 
@@ -142,6 +172,12 @@ impl Player {
 
     /// Take damage
     pub fn take_damage(&mut self, damage: u8) -> bool {
+        self.last_damage_source = Some(DamageSource::Unknown);
+        self.inventory.take_damage(damage)
+    }
+
+    pub fn apply_damage(&mut self, source: DamageSource, damage: u8) -> bool {
+        self.last_damage_source = Some(source);
         self.inventory.take_damage(damage)
     }
 
@@ -219,6 +255,14 @@ impl Player {
             // Health damage at recover < -15 (matching Python Crafter)
             if self.recover_counter < -15.0 {
                 self.recover_counter = 0.0;
+                let cause = if self.inventory.food == 0 {
+                    DamageSource::Starvation
+                } else if self.inventory.drink == 0 {
+                    DamageSource::Thirst
+                } else {
+                    DamageSource::Exhaustion
+                };
+                self.last_damage_source = Some(cause);
                 self.inventory.health = self.inventory.health.saturating_sub(1);
             }
         } else {

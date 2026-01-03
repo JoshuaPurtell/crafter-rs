@@ -23,3 +23,10 @@ image = { version = "0.24", optional = true }
 [features]
 default = []
 png = ["image"]
+
+[workspace]
+members = ["crafter-tui"]
+resolver = "2"
+
+[patch.crates-io]
+opentui-sys = { path = "../mission-control/vendor/opentui-sys" }
