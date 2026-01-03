@@ -477,7 +477,7 @@ impl Session {
     fn process_player_action(&mut self, action: Action) {
         // Wake up if sleeping and any action
         if let Some(player) = self.world.get_player_mut() {
-            if player.sleeping && action != Action::Noop {
+            if player.sleeping && action != Action::Noop && action != Action::Sleep {
                 player.wake_up();
                 return;
             }

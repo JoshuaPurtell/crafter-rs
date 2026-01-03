@@ -9,6 +9,8 @@ use image::{ImageBuffer, RgbImage, Rgba, RgbaImage};
 
 #[cfg(feature = "png")]
 use crate::entity::GameObject;
+#[cfg(not(feature = "png"))]
+use crate::entity::GameObject;
 #[cfg(feature = "png")]
 use crate::material::Material;
 use crate::session::GameState;

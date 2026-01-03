@@ -2702,7 +2702,14 @@ pub fn draw_detail(
                 );
             }
             y = y.saturating_add(1);
-            let max_rows = 6usize.min(max_y.saturating_sub(y) as usize);
+            let max_row_height = visible
+                .iter()
+                .map(|preview| (preview.height / 2).max(1))
+                .max()
+                .unwrap_or(1);
+            let max_rows = ((max_y.saturating_sub(y)) / max_row_height)
+                .max(1)
+                .min(6) as usize;
             for (idx, preview) in visible.iter().take(max_rows).enumerate() {
                 if y >= max_y {
                     break;
@@ -2744,6 +2751,9 @@ pub fn draw_detail(
                     }
                 }
                 let label_y = y.saturating_add(row_height / 2);
+                if label_y >= max_y {
+                    break;
+                }
                 unsafe {
                     ot::bufferDrawText(
                         buffer,
