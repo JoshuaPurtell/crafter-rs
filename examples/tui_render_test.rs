@@ -1,8 +1,10 @@
 //! Test that renders exactly what the TUI would render and saves it as PNG
 use crafter_core::{Session, SessionConfig};
 use crafter_core::image_renderer::{ImageRenderer, ImageRendererConfig};
+#[cfg(feature = "png")]
 use image::{RgbaImage, Rgba};
 
+#[cfg(feature = "png")]
 fn main() {
     let config = SessionConfig {
         world_size: (48, 20),
@@ -91,3 +93,6 @@ fn main() {
              state.inventory.health, state.inventory.food,
              state.inventory.drink, state.inventory.energy);
 }
+
+#[cfg(not(feature = "png"))]
+fn main() {}

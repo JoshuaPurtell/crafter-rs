@@ -1,5 +1,6 @@
 use crafter_core::{ImageRenderer, ImageRendererConfig, Session, SessionConfig};
 
+#[cfg(feature = "png")]
 fn main() {
     let config = SessionConfig {
         world_size: (48, 20),
@@ -55,3 +56,6 @@ fn main() {
              state.inventory.health, state.inventory.food,
              state.inventory.drink, state.inventory.energy);
 }
+
+#[cfg(not(feature = "png"))]
+fn main() {}

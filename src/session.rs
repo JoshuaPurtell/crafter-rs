@@ -165,7 +165,7 @@ impl Session {
 
     /// Reset the session to a new episode
     pub fn reset(&mut self) {
-        let seed = self.config.seed.unwrap_or_else(|| self.rng.gen());
+        let _seed = self.config.seed.unwrap_or_else(|| self.rng.gen());
         let mut generator = WorldGenerator::new(self.config.clone());
         self.world = generator.generate();
         self.timing = SessionTiming::new();
@@ -277,7 +277,7 @@ impl Session {
         let mut debug_events = Vec::new();
 
         // Capture state before action for debugging
-        let (drink_before, food_before, energy_before, sleeping_before, health_before) = self
+        let (drink_before, food_before, _energy_before, sleeping_before, health_before) = self
             .world
             .get_player()
             .map(|p| {
@@ -291,6 +291,66 @@ impl Session {
             })
             .unwrap_or((0, 0, 0, false, 0));
 
+        // Capture action context for debug events
+        let action_event = if action != Action::Noop {
+            let mut desc = format!("ACTION: {:?}", action);
+            if action == Action::Do {
+                if let Some(player) = self.world.get_player() {
+                    let facing_pos = (
+                        player.pos.0 + player.facing.0 as i32,
+                        player.pos.1 + player.facing.1 as i32,
+                    );
+                    let target = if !self.world.in_bounds(facing_pos) {
+                        "out_of_bounds".to_string()
+                    } else if let Some(obj) = self.world.get_object_at(facing_pos) {
+                        match obj {
+                            GameObject::Cow(_) => "cow",
+                            GameObject::Zombie(_) => "zombie",
+                            GameObject::Skeleton(_) => "skeleton",
+                            GameObject::CraftaxMob(mob) => match mob.kind {
+                                crate::entity::CraftaxMobKind::OrcSoldier => "orc_soldier",
+                                crate::entity::CraftaxMobKind::OrcMage => "orc_mage",
+                                crate::entity::CraftaxMobKind::Knight => "knight",
+                                crate::entity::CraftaxMobKind::KnightArcher => "knight_archer",
+                                crate::entity::CraftaxMobKind::Troll => "troll",
+                                crate::entity::CraftaxMobKind::Bat => "bat",
+                                crate::entity::CraftaxMobKind::Snail => "snail",
+                            },
+                            GameObject::Arrow(_) => "arrow",
+                            GameObject::Plant(_) => "plant",
+                            GameObject::Player(_) => "player",
+                        }
+                        .to_string()
+                    } else if let Some(mat) = self.world.get_material(facing_pos) {
+                        match mat {
+                            Material::Water => "water",
+                            Material::Grass => "grass",
+                            Material::Stone => "stone",
+                            Material::Path => "path",
+                            Material::Sand => "sand",
+                            Material::Tree => "tree",
+                            Material::Lava => "lava",
+                            Material::Coal => "coal",
+                            Material::Iron => "iron",
+                            Material::Diamond => "diamond",
+                            Material::Table => "table",
+                            Material::Furnace => "furnace",
+                            Material::Sapphire => "sapphire",
+                            Material::Ruby => "ruby",
+                            Material::Chest => "chest",
+                        }
+                        .to_string()
+                    } else {
+                        "empty".to_string()
+                    };
+                    desc = format!("{} on {} at ({}, {})", desc, target, facing_pos.0, facing_pos.1);
+                }
+            }
+            Some(desc)
+        } else {
+            None
+        };
+
         // Update daylight
         if self.config.day_night_cycle {
             self.world
@@ -299,6 +359,10 @@ impl Session {
 
         // Process player action
         self.process_player_action(action);
+
+        if let Some(event) = action_event {
+            debug_events.push(event);
+        }
 
         // Capture state after action (before life stats update)
         let (drink_after_action, food_after_action, energy_after_action) = self.world.get_player()
@@ -327,6 +391,8 @@ impl Session {
                 self.config.hunger_enabled,
                 self.config.thirst_enabled,
                 self.config.fatigue_enabled,
+                self.config.hunger_rate as f32,
+                self.config.thirst_rate as f32,
             );
             // Auto-wake when energy is full (matching Python Crafter)
             if player.sleeping && player.inventory.energy >= crate::inventory::MAX_INVENTORY_VALUE
@@ -440,6 +506,19 @@ impl Session {
             Action::MakeWoodSword => self.process_craft_wood_sword(),
             Action::MakeStoneSword => self.process_craft_stone_sword(),
             Action::MakeIronSword => self.process_craft_iron_sword(),
+            Action::MakeDiamondPickaxe => self.process_craft_diamond_pickaxe(),
+            Action::MakeDiamondSword => self.process_craft_diamond_sword(),
+            Action::MakeIronArmor => self.process_craft_iron_armor(),
+            Action::MakeDiamondArmor => self.process_craft_diamond_armor(),
+            Action::MakeBow => self.process_craft_bow(),
+            Action::MakeArrow => self.process_craft_arrow(),
+            Action::ShootArrow => self.process_shoot_arrow(),
+            Action::DrinkPotionRed => self.process_drink_potion(crate::craftax::loot::PotionKind::Red),
+            Action::DrinkPotionGreen => self.process_drink_potion(crate::craftax::loot::PotionKind::Green),
+            Action::DrinkPotionBlue => self.process_drink_potion(crate::craftax::loot::PotionKind::Blue),
+            Action::DrinkPotionPink => self.process_drink_potion(crate::craftax::loot::PotionKind::Pink),
+            Action::DrinkPotionCyan => self.process_drink_potion(crate::craftax::loot::PotionKind::Cyan),
+            Action::DrinkPotionYellow => self.process_drink_potion(crate::craftax::loot::PotionKind::Yellow),
         }
     }
 
@@ -501,6 +580,90 @@ impl Session {
         }
     }
 
+    fn apply_player_damage_with_reduction(
+        player: &mut crate::entity::Player,
+        source: DamageSource,
+        base_damage: f32,
+        sleeping_multiplier: f32,
+        reduction: f32,
+    ) {
+        let mut damage = base_damage * sleeping_multiplier;
+        let clamped = reduction.clamp(0.0, 0.9);
+        damage *= 1.0 - clamped;
+        let mut final_damage = damage.round().max(0.0) as u8;
+        if final_damage == 0 && damage > 0.0 {
+            final_damage = 1;
+        }
+        player.apply_damage(source, final_damage);
+    }
+
+    fn grant_xp(&mut self, amount: u32) {
+        if !self.config.craftax.enabled || !self.config.craftax.xp_enabled {
+            return;
+        }
+
+        if let Some(player) = self.world.get_player_mut() {
+            player.inventory.add_xp(amount);
+            if self.config.craftax.achievements_enabled {
+                player.achievements.gain_xp = player.achievements.gain_xp.saturating_add(amount);
+            }
+            loop {
+                let next_level = player.inventory.level.saturating_add(1);
+                let threshold = 10 * next_level as u32;
+                if player.inventory.xp < threshold {
+                    break;
+                }
+                player.inventory.level = next_level;
+                player.inventory.stat_points = player.inventory.stat_points.saturating_add(1);
+                if self.config.craftax.achievements_enabled {
+                    player.achievements.reach_level += 1;
+                }
+            }
+        }
+    }
+
+    fn record_craftax_kill(&mut self, kind: crate::entity::CraftaxMobKind) {
+        if !self.config.craftax.enabled || !self.config.craftax.achievements_enabled {
+            return;
+        }
+        if let Some(player) = self.world.get_player_mut() {
+            match kind {
+                crate::entity::CraftaxMobKind::OrcSoldier => player.achievements.defeat_orc_soldier += 1,
+                crate::entity::CraftaxMobKind::OrcMage => player.achievements.defeat_orc_mage += 1,
+                crate::entity::CraftaxMobKind::Knight => player.achievements.defeat_knight += 1,
+                crate::entity::CraftaxMobKind::KnightArcher => {
+                    player.achievements.defeat_knight_archer += 1;
+                }
+                crate::entity::CraftaxMobKind::Troll => player.achievements.defeat_troll += 1,
+                _ => {}
+            }
+        }
+    }
+
+    fn random_spawn_near_player(
+        &mut self,
+        player_pos: Position,
+        min_dist: f32,
+        max_dist: f32,
+    ) -> Option<Position> {
+        if max_dist <= 0.0 || min_dist < 0.0 {
+            return None;
+        }
+        let attempts = 6;
+        for _ in 0..attempts {
+            let angle: f32 = self.rng.gen::<f32>() * std::f32::consts::TAU;
+            let dist: f32 = min_dist + self.rng.gen::<f32>() * (max_dist - min_dist);
+            let pos = (
+                player_pos.0 + (angle.cos() * dist) as i32,
+                player_pos.1 + (angle.sin() * dist) as i32,
+            );
+            if self.world.in_bounds(pos) {
+                return Some(pos);
+            }
+        }
+        None
+    }
+
     /// Interact with an object
     fn interact_with_object(&mut self, obj_id: u32, player: &crate::entity::Player) {
         let obj = match self.world.get_object(obj_id) {
@@ -510,7 +673,9 @@ impl Session {
 
         match obj {
             GameObject::Cow(mut cow) => {
-                let damage = player.attack_damage();
+                let damage =
+                    (player.attack_damage() as f32 * self.config.player_damage_mult).max(0.0)
+                        as u8;
                 if !cow.take_damage(damage) {
                     // Cow died - gives 6 food (matching Python Crafter)
                     self.world.remove_object(obj_id);
@@ -526,13 +691,16 @@ impl Session {
                 }
             }
             GameObject::Zombie(mut zombie) => {
-                let damage = player.attack_damage();
+                let damage =
+                    (player.attack_damage() as f32 * self.config.player_damage_mult).max(0.0)
+                        as u8;
                 if !zombie.take_damage(damage) {
                     // Zombie died
                     self.world.remove_object(obj_id);
                     if let Some(p) = self.world.get_player_mut() {
                         p.achievements.defeat_zombie += 1;
                     }
+                    self.grant_xp(2);
                 } else {
                     if let Some(GameObject::Zombie(z)) = self.world.get_object_mut(obj_id) {
                         z.health = zombie.health;
@@ -540,16 +708,34 @@ impl Session {
                 }
             }
             GameObject::Skeleton(mut skeleton) => {
-                let damage = player.attack_damage();
+                let damage =
+                    (player.attack_damage() as f32 * self.config.player_damage_mult).max(0.0)
+                        as u8;
                 if !skeleton.take_damage(damage) {
                     self.world.remove_object(obj_id);
                     if let Some(p) = self.world.get_player_mut() {
                         p.achievements.defeat_skeleton += 1;
                     }
+                    self.grant_xp(2);
                 } else {
                     if let Some(GameObject::Skeleton(s)) = self.world.get_object_mut(obj_id) {
                         s.health = skeleton.health;
                     }
+                }
+            }
+            GameObject::CraftaxMob(mut mob) => {
+                if !self.config.craftax.enabled || !self.config.craftax.combat_enabled {
+                    return;
+                }
+                let damage =
+                    (player.attack_damage() as f32 * self.config.player_damage_mult).max(0.0)
+                        as u8;
+                if !mob.take_damage(damage) {
+                    self.world.remove_object(obj_id);
+                    self.grant_xp(3);
+                    self.record_craftax_kill(mob.kind);
+                } else if let Some(GameObject::CraftaxMob(m)) = self.world.get_object_mut(obj_id) {
+                    m.health = mob.health;
                 }
             }
             GameObject::Plant(plant) => {
@@ -616,6 +802,94 @@ impl Session {
                     if let Some(p) = self.world.get_player_mut() {
                         p.inventory.add_diamond(1);
                         p.achievements.collect_diamond += 1;
+                    }
+                }
+            }
+            Material::Sapphire => {
+                if !self.config.craftax.enabled || !self.config.craftax.items_enabled {
+                    return;
+                }
+                if player.inventory.best_pickaxe_tier() >= 4 {
+                    self.world.set_material(pos, Material::Path);
+                    if let Some(p) = self.world.get_player_mut() {
+                        p.inventory.add_sapphire(1);
+                        if self.config.craftax.achievements_enabled {
+                            p.achievements.collect_sapphire += 1;
+                        }
+                    }
+                }
+            }
+            Material::Ruby => {
+                if !self.config.craftax.enabled || !self.config.craftax.items_enabled {
+                    return;
+                }
+                if player.inventory.best_pickaxe_tier() >= 4 {
+                    self.world.set_material(pos, Material::Path);
+                    if let Some(p) = self.world.get_player_mut() {
+                        p.inventory.add_ruby(1);
+                        if self.config.craftax.achievements_enabled {
+                            p.achievements.collect_ruby += 1;
+                        }
+                    }
+                }
+            }
+            Material::Chest => {
+                if !self.config.craftax.enabled
+                    || !self.config.craftax.items_enabled
+                    || !self.config.craftax.chests_enabled
+                {
+                    return;
+                }
+                self.world.set_material(pos, Material::Path);
+                let loot = crate::craftax::loot::roll_chest_loot(&mut self.rng, &self.config.craftax.loot);
+                if let Some(p) = self.world.get_player_mut() {
+                    if self.config.craftax.achievements_enabled {
+                        p.achievements.open_chest += 1;
+                    }
+                    if loot.arrows > 0 {
+                        p.inventory.add_arrows(loot.arrows);
+                    }
+                    if loot.potion_red > 0 {
+                        p.inventory.add_potion_red(loot.potion_red);
+                    }
+                    if loot.potion_green > 0 {
+                        p.inventory.add_potion_green(loot.potion_green);
+                    }
+                    if loot.potion_blue > 0 {
+                        p.inventory.add_potion_blue(loot.potion_blue);
+                    }
+                    if loot.potion_pink > 0 {
+                        p.inventory.add_potion_pink(loot.potion_pink);
+                    }
+                    if loot.potion_cyan > 0 {
+                        p.inventory.add_potion_cyan(loot.potion_cyan);
+                    }
+                    if loot.potion_yellow > 0 {
+                        p.inventory.add_potion_yellow(loot.potion_yellow);
+                    }
+                    if loot.sapphire > 0 {
+                        p.inventory.add_sapphire(loot.sapphire);
+                        if self.config.craftax.achievements_enabled {
+                            p.achievements.collect_sapphire += loot.sapphire as u32;
+                        }
+                    }
+                    if loot.ruby > 0 {
+                        p.inventory.add_ruby(loot.ruby);
+                        if self.config.craftax.achievements_enabled {
+                            p.achievements.collect_ruby += loot.ruby as u32;
+                        }
+                    }
+                    if loot.coal > 0 {
+                        p.inventory.add_coal(loot.coal);
+                        p.achievements.collect_coal += loot.coal as u32;
+                    }
+                    if loot.iron > 0 {
+                        p.inventory.add_iron(loot.iron);
+                        p.achievements.collect_iron += loot.iron as u32;
+                    }
+                    if loot.diamond > 0 {
+                        p.inventory.add_diamond(loot.diamond);
+                        p.achievements.collect_diamond += loot.diamond as u32;
                     }
                 }
             }
@@ -846,6 +1120,233 @@ impl Session {
         }
     }
 
+    fn process_craft_diamond_pickaxe(&mut self) {
+        if !self.config.craftax.enabled || !self.config.craftax.items_enabled {
+            return;
+        }
+        let has_table = self
+            .world
+            .get_player()
+            .map(|p| self.world.has_adjacent_table(p.pos))
+            .unwrap_or(false);
+        if !has_table {
+            return;
+        }
+
+        if let Some(p) = self.world.get_player_mut() {
+            if p.inventory.craft_diamond_pickaxe() {
+                if self.config.craftax.achievements_enabled {
+                    p.achievements.make_diamond_pickaxe += 1;
+                }
+            }
+        }
+    }
+
+    fn process_craft_diamond_sword(&mut self) {
+        if !self.config.craftax.enabled || !self.config.craftax.items_enabled {
+            return;
+        }
+        let has_table = self
+            .world
+            .get_player()
+            .map(|p| self.world.has_adjacent_table(p.pos))
+            .unwrap_or(false);
+        if !has_table {
+            return;
+        }
+
+        if let Some(p) = self.world.get_player_mut() {
+            if p.inventory.craft_diamond_sword() {
+                if self.config.craftax.achievements_enabled {
+                    p.achievements.make_diamond_sword += 1;
+                }
+            }
+        }
+    }
+
+    fn process_craft_iron_armor(&mut self) {
+        if !self.config.craftax.enabled || !self.config.craftax.items_enabled {
+            return;
+        }
+        let player_pos = self.world.get_player().map(|p| p.pos);
+        let has_table = player_pos
+            .map(|pos| self.world.has_adjacent_table(pos))
+            .unwrap_or(false);
+        let has_furnace = player_pos
+            .map(|pos| self.world.has_adjacent_furnace(pos))
+            .unwrap_or(false);
+
+        if !has_table || !has_furnace {
+            return;
+        }
+
+        if let Some(p) = self.world.get_player_mut() {
+            if p.inventory.craft_iron_armor() {
+                if self.config.craftax.achievements_enabled {
+                    p.achievements.make_iron_armor += 1;
+                }
+            }
+        }
+    }
+
+    fn process_craft_diamond_armor(&mut self) {
+        if !self.config.craftax.enabled || !self.config.craftax.items_enabled {
+            return;
+        }
+        let has_table = self
+            .world
+            .get_player()
+            .map(|p| self.world.has_adjacent_table(p.pos))
+            .unwrap_or(false);
+        if !has_table {
+            return;
+        }
+
+        if let Some(p) = self.world.get_player_mut() {
+            if p.inventory.craft_diamond_armor() {
+                if self.config.craftax.achievements_enabled {
+                    p.achievements.make_diamond_armor += 1;
+                }
+            }
+        }
+    }
+
+    fn process_craft_bow(&mut self) {
+        if !self.config.craftax.enabled || !self.config.craftax.items_enabled {
+            return;
+        }
+        let has_table = self
+            .world
+            .get_player()
+            .map(|p| self.world.has_adjacent_table(p.pos))
+            .unwrap_or(false);
+        if !has_table {
+            return;
+        }
+
+        if let Some(p) = self.world.get_player_mut() {
+            if p.inventory.craft_bow() {
+                if self.config.craftax.achievements_enabled {
+                    p.achievements.make_bow += 1;
+                }
+            }
+        }
+    }
+
+    fn process_craft_arrow(&mut self) {
+        if !self.config.craftax.enabled || !self.config.craftax.items_enabled {
+            return;
+        }
+        let has_table = self
+            .world
+            .get_player()
+            .map(|p| self.world.has_adjacent_table(p.pos))
+            .unwrap_or(false);
+        if !has_table {
+            return;
+        }
+
+        if let Some(p) = self.world.get_player_mut() {
+            if p.inventory.craft_arrow() {
+                if self.config.craftax.achievements_enabled {
+                    p.achievements.make_arrow += 1;
+                }
+            }
+        }
+    }
+
+    fn process_shoot_arrow(&mut self) {
+        if !self.config.craftax.enabled
+            || !self.config.craftax.items_enabled
+            || !self.config.craftax.combat_enabled
+        {
+            return;
+        }
+
+        let player = match self.world.get_player() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        if player.inventory.bow == 0 || player.inventory.arrows == 0 {
+            return;
+        }
+
+        if let Some(p) = self.world.get_player_mut() {
+            if p.inventory.arrows > 0 {
+                p.inventory.arrows -= 1;
+            }
+        }
+
+        let arrow_pos = (
+            player.pos.0 + player.facing.0 as i32,
+            player.pos.1 + player.facing.1 as i32,
+        );
+        if self.world.is_walkable(arrow_pos) {
+            let base_damage = 2 + player.inventory.best_sword_tier();
+            let arrow = crate::entity::Arrow::with_stats(
+                arrow_pos,
+                player.facing,
+                crate::entity::ProjectileKind::Arrow,
+                base_damage,
+                DamageSource::PlayerArrow,
+            );
+            self.world.add_object(GameObject::Arrow(arrow));
+        }
+    }
+
+    fn process_drink_potion(&mut self, potion: crate::craftax::loot::PotionKind) {
+        if !self.config.craftax.enabled
+            || !self.config.craftax.items_enabled
+            || !self.config.craftax.potions_enabled
+        {
+            return;
+        }
+
+        if let Some(p) = self.world.get_player_mut() {
+            let consumed = match potion {
+                crate::craftax::loot::PotionKind::Red if p.inventory.potion_red > 0 => {
+                    p.inventory.potion_red -= 1;
+                    p.inventory.add_health(2);
+                    true
+                }
+                crate::craftax::loot::PotionKind::Green if p.inventory.potion_green > 0 => {
+                    p.inventory.potion_green -= 1;
+                    p.inventory.add_energy(2);
+                    true
+                }
+                crate::craftax::loot::PotionKind::Blue if p.inventory.potion_blue > 0 => {
+                    p.inventory.potion_blue -= 1;
+                    p.inventory.add_drink(2);
+                    true
+                }
+                crate::craftax::loot::PotionKind::Pink if p.inventory.potion_pink > 0 => {
+                    p.inventory.potion_pink -= 1;
+                    p.inventory.add_food(2);
+                    true
+                }
+                crate::craftax::loot::PotionKind::Cyan if p.inventory.potion_cyan > 0 => {
+                    p.inventory.potion_cyan -= 1;
+                    p.inventory.add_health(1);
+                    p.inventory.add_energy(1);
+                    true
+                }
+                crate::craftax::loot::PotionKind::Yellow if p.inventory.potion_yellow > 0 => {
+                    p.inventory.potion_yellow -= 1;
+                    p.inventory.add_food(1);
+                    p.inventory.add_drink(1);
+                    true
+                }
+                _ => false,
+            };
+            if consumed {
+                if self.config.craftax.achievements_enabled {
+                    p.achievements.drink_potion += 1;
+                }
+            }
+        }
+    }
+
     /// Process mob AI
     fn process_mobs(&mut self) {
         let player_pos = self.world.get_player().map(|p| p.pos);
@@ -859,7 +1360,10 @@ impl Session {
             .filter_map(|(&id, obj)| {
                 if matches!(
                     obj,
-                    GameObject::Cow(_) | GameObject::Zombie(_) | GameObject::Skeleton(_)
+                    GameObject::Cow(_)
+                        | GameObject::Zombie(_)
+                        | GameObject::Skeleton(_)
+                        | GameObject::CraftaxMob(_)
                 ) {
                     Some(id)
                 } else {
@@ -886,6 +1390,14 @@ impl Session {
                 GameObject::Skeleton(skeleton) => {
                     if let Some(player_pos) = player_pos {
                         self.process_skeleton_ai(id, skeleton, player_pos);
+                    }
+                }
+                GameObject::CraftaxMob(mob) => {
+                    if !self.config.craftax.enabled || !self.config.craftax.mobs_enabled {
+                        continue;
+                    }
+                    if let Some(player_pos) = player_pos {
+                        self.process_craftax_mob_ai(id, mob, player_pos, player_sleeping);
                     }
                 }
                 _ => {}
@@ -953,11 +1465,22 @@ impl Session {
             if zombie.cooldown > 0 {
                 zombie.cooldown -= 1;
             } else {
-                let base_damage = if player_sleeping { 7 } else { 2 };
-                let damage = (base_damage as f32 * self.config.zombie_damage_mult) as u8;
+                let base_damage = 2.0 * self.config.zombie_damage_mult;
+                let sleep_mult = if player_sleeping { 3.5 } else { 1.0 };
 
                 if let Some(player) = self.world.get_player_mut() {
-                    player.apply_damage(DamageSource::Zombie, damage);
+                    let reduction = if self.config.craftax.enabled && self.config.craftax.combat_enabled {
+                        player.inventory.armor_reduction()
+                    } else {
+                        0.0
+                    };
+                    Session::apply_player_damage_with_reduction(
+                        player,
+                        DamageSource::Zombie,
+                        base_damage,
+                        sleep_mult,
+                        reduction,
+                    );
                     if player_sleeping {
                         player.wake_up();
                     }
@@ -1034,8 +1557,14 @@ impl Session {
                 skeleton.pos.0 + dx as i32,
                 skeleton.pos.1 + dy as i32,
             );
-            self.world
-                .add_object(GameObject::Arrow(Arrow::new(arrow_pos, (dx, dy))));
+            let damage = (2.0 * self.config.arrow_damage_mult).round().max(1.0) as u8;
+            self.world.add_object(GameObject::Arrow(Arrow::with_stats(
+                arrow_pos,
+                (dx, dy),
+                crate::entity::ProjectileKind::Arrow,
+                damage,
+                DamageSource::Arrow,
+            )));
             skeleton.reset_reload();
         // Priority 3: Chase at 30% probability when in range (dist <= 8)
         } else if dist <= 8 && self.rng.gen::<f32>() < 0.3 {
@@ -1060,6 +1589,119 @@ impl Session {
         // Update skeleton state
         if let Some(GameObject::Skeleton(s)) = self.world.get_object_mut(id) {
             s.reload = skeleton.reload;
+        }
+    }
+
+    fn process_craftax_mob_ai(
+        &mut self,
+        id: u32,
+        mut mob: crate::entity::CraftaxMob,
+        player_pos: Position,
+        player_sleeping: bool,
+    ) {
+        let stats = crate::craftax::mobs::stats(mob.kind);
+        let dist = (mob.pos.0 - player_pos.0).abs() + (mob.pos.1 - player_pos.1).abs();
+        let combat_enabled = self.config.craftax.combat_enabled;
+
+        if mob.cooldown > 0 {
+            mob.cooldown = mob.cooldown.saturating_sub(1);
+        }
+
+        if mob.is_passive() {
+            let move_chance = match mob.kind {
+                crate::entity::CraftaxMobKind::Bat => 0.6,
+                crate::entity::CraftaxMobKind::Snail => 0.3,
+                _ => 0.4,
+            };
+            if self.rng.gen::<f32>() < move_chance {
+                let directions = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+                let dir = directions[self.rng.gen_range(0..4)];
+                let new_pos = (mob.pos.0 + dir.0, mob.pos.1 + dir.1);
+                let walkable = match mob.kind {
+                    crate::entity::CraftaxMobKind::Bat => {
+                        self.world.in_bounds(new_pos) && self.world.get_object_at(new_pos).is_none()
+                    }
+                    _ => self.world.is_walkable(new_pos) && self.world.get_object_at(new_pos).is_none(),
+                };
+                if walkable {
+                    self.world.move_object(id, new_pos);
+                }
+            }
+        } else {
+            let mut attacked = false;
+            if combat_enabled && stats.is_ranged() && dist <= stats.range && mob.cooldown == 0 {
+                let (dx, dy) = self.toward_direction(mob.pos, player_pos, true);
+                let arrow_pos = (mob.pos.0 + dx, mob.pos.1 + dy);
+                if self.world.in_bounds(arrow_pos) {
+                    let source = match stats.projectile {
+                        crate::entity::ProjectileKind::Arrow => DamageSource::CraftaxRanged,
+                        crate::entity::ProjectileKind::Fireball
+                        | crate::entity::ProjectileKind::Iceball => DamageSource::CraftaxMagic,
+                    };
+                    let arrow = Arrow::with_stats(
+                        arrow_pos,
+                        (dx as i8, dy as i8),
+                        stats.projectile,
+                        stats.ranged_damage,
+                        source,
+                    );
+                    self.world.add_object(GameObject::Arrow(arrow));
+                    mob.cooldown = stats.cooldown;
+                    attacked = true;
+                }
+            }
+
+            if combat_enabled && stats.is_melee() && dist <= 1 && mob.cooldown == 0 {
+                if let Some(player) = self.world.get_player_mut() {
+                    let sleep_mult = if player_sleeping { 3.5 } else { 1.0 };
+                    let reduction = if self.config.craftax.enabled && self.config.craftax.combat_enabled {
+                        player.inventory.armor_reduction()
+                    } else {
+                        0.0
+                    };
+                    Session::apply_player_damage_with_reduction(
+                        player,
+                        DamageSource::CraftaxMelee,
+                        stats.melee_damage as f32,
+                        sleep_mult,
+                        reduction,
+                    );
+                    if player_sleeping {
+                        player.wake_up();
+                    }
+                }
+                mob.cooldown = stats.cooldown;
+                attacked = true;
+            }
+
+            if !attacked {
+                let flee = stats.is_ranged() && dist <= 2;
+                let move_toward = dist <= 8 && self.rng.gen::<f32>() < 0.6;
+                let move_random = self.rng.gen::<f32>() < 0.2;
+                let (dx, dy) = if flee {
+                    let (dx, dy) = self.toward_direction(mob.pos, player_pos, true);
+                    (-dx, -dy)
+                } else if move_toward {
+                    self.toward_direction(mob.pos, player_pos, true)
+                } else if move_random {
+                    let directions = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+                    directions[self.rng.gen_range(0..4)]
+                } else {
+                    (0, 0)
+                };
+
+                if dx != 0 || dy != 0 {
+                    let new_pos = (mob.pos.0 + dx, mob.pos.1 + dy);
+                    if self.world.is_walkable(new_pos) && self.world.get_object_at(new_pos).is_none()
+                    {
+                        self.world.move_object(id, new_pos);
+                    }
+                }
+            }
+        }
+
+        if let Some(GameObject::CraftaxMob(m)) = self.world.get_object_mut(id) {
+            m.cooldown = mob.cooldown;
         }
     }
 
@@ -1092,9 +1734,19 @@ impl Session {
             // Check if arrow hits player
             if let Some(player) = self.world.get_player() {
                 if next_pos == player.pos {
-                    let damage = (2.0 * self.config.arrow_damage_mult) as u8;
                     if let Some(p) = self.world.get_player_mut() {
-                        p.apply_damage(DamageSource::Arrow, damage);
+                        let reduction = if self.config.craftax.enabled && self.config.craftax.combat_enabled {
+                            p.inventory.armor_reduction()
+                        } else {
+                            0.0
+                        };
+                        Session::apply_player_damage_with_reduction(
+                            p,
+                            arrow.source,
+                            arrow.damage as f32,
+                            1.0,
+                            reduction,
+                        );
                         if p.sleeping {
                             p.wake_up();
                         }
@@ -1107,7 +1759,9 @@ impl Session {
             // Check if arrow hits a mob (matching Python Crafter: arrows damage any object)
             if let Some(target_id) = self.world.get_object_id_at(next_pos) {
                 let mut remove_target = false;
-                let arrow_damage = (2.0 * self.config.arrow_damage_mult) as u8;
+                let arrow_damage = arrow.damage;
+                let mut grant_xp_amount: Option<u32> = None;
+                let mut craftax_kill: Option<crate::entity::CraftaxMobKind> = None;
 
                 if let Some(obj) = self.world.get_object_mut(target_id) {
                     match obj {
@@ -1123,6 +1777,9 @@ impl Session {
                                 zombie.health -= arrow_damage;
                             } else {
                                 remove_target = true;
+                                if matches!(arrow.source, DamageSource::PlayerArrow) {
+                                    grant_xp_amount = Some(2);
+                                }
                             }
                         }
                         GameObject::Skeleton(skeleton) => {
@@ -1130,6 +1787,9 @@ impl Session {
                                 skeleton.health -= arrow_damage;
                             } else {
                                 remove_target = true;
+                                if matches!(arrow.source, DamageSource::PlayerArrow) {
+                                    grant_xp_amount = Some(2);
+                                }
                             }
                         }
                         GameObject::Plant(plant) => {
@@ -1137,6 +1797,17 @@ impl Session {
                                 plant.health -= arrow_damage;
                             } else {
                                 remove_target = true;
+                            }
+                        }
+                        GameObject::CraftaxMob(mob) => {
+                            if mob.health > arrow_damage {
+                                mob.health -= arrow_damage;
+                            } else {
+                                remove_target = true;
+                                if matches!(arrow.source, DamageSource::PlayerArrow) {
+                                    grant_xp_amount = Some(3);
+                                    craftax_kill = Some(mob.kind);
+                                }
                             }
                         }
                         _ => {}
@@ -1147,6 +1818,12 @@ impl Session {
                     self.world.remove_object(target_id);
                 }
                 self.world.remove_object(id);
+                if let Some(amount) = grant_xp_amount {
+                    self.grant_xp(amount);
+                }
+                if let Some(kind) = craftax_kill {
+                    self.record_craftax_kill(kind);
+                }
                 continue;
             }
 
@@ -1209,7 +1886,11 @@ impl Session {
                 let adj_pos = (plant_pos.0 + dx, plant_pos.1 + dy);
                 if let Some(obj) = self.world.get_object_at(adj_pos) {
                     // Zombies, skeletons, and cows damage plants
-                    if matches!(obj, GameObject::Zombie(_) | GameObject::Skeleton(_) | GameObject::Cow(_)) {
+                    if matches!(
+                        obj,
+                        GameObject::Zombie(_) | GameObject::Skeleton(_) | GameObject::Cow(_)
+                    ) || matches!(obj, GameObject::CraftaxMob(m) if m.is_hostile())
+                    {
                         take_damage = true;
                         break;
                     }
@@ -1275,6 +1956,18 @@ impl Session {
                         {
                             Some(id)
                         }
+                        GameObject::CraftaxMob(mob)
+                            if self.config.craftax.enabled
+                                && self.config.craftax.mobs_enabled
+                                && self.rng.gen::<f32>()
+                                    < if mob.is_hostile() {
+                                        self.config.zombie_despawn_rate
+                                    } else {
+                                        self.config.cow_despawn_rate
+                                    } =>
+                        {
+                            Some(id)
+                        }
                         _ => None,
                     }
                 } else {
@@ -1323,6 +2016,64 @@ impl Session {
                 )));
             }
         }
+
+        if !self.config.craftax.enabled || !self.config.craftax.mobs_enabled {
+            return;
+        }
+
+        // Craftax hostile spawns (night-time bias)
+        if self.world.daylight < 0.5 {
+            let hostile_spawns = [
+                (crate::entity::CraftaxMobKind::OrcSoldier, 0.01, self.config.craftax.spawn.orc_soldier_density),
+                (crate::entity::CraftaxMobKind::OrcMage, 0.008, self.config.craftax.spawn.orc_mage_density),
+                (crate::entity::CraftaxMobKind::Knight, 0.004, self.config.craftax.spawn.knight_density),
+                (
+                    crate::entity::CraftaxMobKind::KnightArcher,
+                    0.004,
+                    self.config.craftax.spawn.knight_archer_density,
+                ),
+                (crate::entity::CraftaxMobKind::Troll, 0.003, self.config.craftax.spawn.troll_density),
+            ];
+
+            for (kind, base_rate, density) in hostile_spawns {
+                if self.rng.gen::<f32>() < base_rate * density {
+                    if let Some(pos) = self.random_spawn_near_player(player_pos, 12.0, 20.0) {
+                        if self.world.is_walkable(pos) && self.world.get_object_at(pos).is_none() {
+                            let stats = crate::craftax::mobs::stats(kind);
+                            let mob = crate::entity::CraftaxMob::new(kind, pos, stats.health);
+                            self.world.add_object(GameObject::CraftaxMob(mob));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Craftax passive spawns (any time)
+        if self.rng.gen::<f32>() < 0.02 * self.config.craftax.spawn.snail_density {
+            if let Some(pos) = self.random_spawn_near_player(player_pos, 8.0, 16.0) {
+                if self.world.get_material(pos) == Some(Material::Grass)
+                    && self.world.get_object_at(pos).is_none()
+                {
+                    let stats = crate::craftax::mobs::stats(crate::entity::CraftaxMobKind::Snail);
+                    let mob =
+                        crate::entity::CraftaxMob::new(crate::entity::CraftaxMobKind::Snail, pos, stats.health);
+                    self.world.add_object(GameObject::CraftaxMob(mob));
+                }
+            }
+        }
+
+        if self.rng.gen::<f32>() < 0.02 * self.config.craftax.spawn.bat_density {
+            if let Some(pos) = self.random_spawn_near_player(player_pos, 8.0, 16.0) {
+                if self.world.get_material(pos) == Some(Material::Path)
+                    && self.world.get_object_at(pos).is_none()
+                {
+                    let stats = crate::craftax::mobs::stats(crate::entity::CraftaxMobKind::Bat);
+                    let mob =
+                        crate::entity::CraftaxMob::new(crate::entity::CraftaxMobKind::Bat, pos, stats.health);
+                    self.world.add_object(GameObject::CraftaxMob(mob));
+                }
+            }
+        }
     }
 
     /// Check for game over conditions
@@ -1357,7 +2108,13 @@ impl Session {
         let mut reward = 0.0;
         let mut newly_unlocked = Vec::new();
 
-        for name in Achievements::all_names() {
+        let names = if self.config.craftax.enabled && self.config.craftax.achievements_enabled {
+            Achievements::all_names_with_craftax()
+        } else {
+            Achievements::all_names().to_vec()
+        };
+
+        for name in names {
             let curr = current.get(name).unwrap_or(0);
             let prev = self.prev_achievements.get(name).unwrap_or(0);
             if curr > prev {
@@ -1401,7 +2158,7 @@ mod tests {
         };
 
         let mut session = Session::new(config);
-        let initial_pos = session.get_state().player_pos;
+        let _initial_pos = session.get_state().player_pos;
 
         // Move right
         session.step(Action::MoveRight);
@@ -1473,8 +2230,11 @@ mod tests {
                                 Material::Coal => 'c',
                                 Material::Iron => 'i',
                                 Material::Diamond => 'D',
-                                Material::Lava => 'L',
-                                Material::Path => '=',
+                                Material::Sapphire => 's',
+                                Material::Ruby => 'r',
+                                Material::Chest => 'H',
+                                Material::Lava => '%',
+                                Material::Path => '_',
                                 Material::Table => '+',
                                 Material::Furnace => 'F',
                             });
@@ -2541,7 +3301,13 @@ mod mechanics_tests {
         let player_pos = session.get_state().player_pos;
         // Place arrow moving toward player
         let arrow_pos = (player_pos.0 + 2, player_pos.1);
-        session.world.add_object(GameObject::Arrow(Arrow::new(arrow_pos, (-1, 0))));
+        session.world.add_object(GameObject::Arrow(Arrow::with_stats(
+            arrow_pos,
+            (-1, 0),
+            crate::entity::ProjectileKind::Arrow,
+            2,
+            DamageSource::Arrow,
+        )));
 
         let initial_health = session.get_state().inventory.health;
 
@@ -2988,7 +3754,7 @@ mod mechanics_tests {
 
         // Player should die if they step on lava - but lava isn't walkable
         // So this test verifies lava blocks movement instead
-        let result = session.step(Action::MoveRight);
+        let _result = session.step(Action::MoveRight);
         // If player moved onto lava (shouldn't happen), they'd die
         // But lava should block, so position shouldn't change
     }

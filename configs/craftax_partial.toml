@@ -1,0 +1,12 @@
+# Craftax partial mode: classic world + craftax items/mobs
+
+[craftax]
+enabled = true
+mobs_enabled = true
+worldgen_enabled = true
+items_enabled = true
+combat_enabled = true
+chests_enabled = true
+potions_enabled = true
+xp_enabled = true
+achievements_enabled = true

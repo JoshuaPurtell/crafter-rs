@@ -2,6 +2,10 @@
 
 use crate::session::TimeMode;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Session configuration with all game parameters
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,6 +113,396 @@ pub struct SessionConfig {
 
     /// Default ticks per second for real-time mode (default: 10.0)
     pub default_ticks_per_second: f32,
+
+    /// Craftax feature toggles and parameters
+    #[serde(default)]
+    pub craftax: CraftaxConfig,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CraftaxConfig {
+    pub enabled: bool,
+    pub mobs_enabled: bool,
+    pub worldgen_enabled: bool,
+    pub items_enabled: bool,
+    pub combat_enabled: bool,
+    pub chests_enabled: bool,
+    pub potions_enabled: bool,
+    pub xp_enabled: bool,
+    pub achievements_enabled: bool,
+    pub spawn: CraftaxSpawnConfig,
+    pub loot: CraftaxLootConfig,
+}
+
+impl Default for CraftaxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mobs_enabled: true,
+            worldgen_enabled: true,
+            items_enabled: true,
+            combat_enabled: true,
+            chests_enabled: true,
+            potions_enabled: true,
+            xp_enabled: true,
+            achievements_enabled: true,
+            spawn: CraftaxSpawnConfig::default(),
+            loot: CraftaxLootConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CraftaxSpawnConfig {
+    pub sapphire_density: f32,
+    pub ruby_density: f32,
+    pub chest_density: f32,
+    pub orc_soldier_density: f32,
+    pub orc_mage_density: f32,
+    pub knight_density: f32,
+    pub knight_archer_density: f32,
+    pub troll_density: f32,
+    pub bat_density: f32,
+    pub snail_density: f32,
+}
+
+impl Default for CraftaxSpawnConfig {
+    fn default() -> Self {
+        Self {
+            sapphire_density: 1.0,
+            ruby_density: 1.0,
+            chest_density: 1.0,
+            orc_soldier_density: 1.0,
+            orc_mage_density: 1.0,
+            knight_density: 1.0,
+            knight_archer_density: 1.0,
+            troll_density: 1.0,
+            bat_density: 1.0,
+            snail_density: 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CraftaxLootConfig {
+    pub potion_drop_chance: f32,
+    pub arrow_drop_chance: f32,
+    pub gem_drop_chance: f32,
+}
+
+impl Default for CraftaxLootConfig {
+    fn default() -> Self {
+        Self {
+            potion_drop_chance: 0.35,
+            arrow_drop_chance: 0.5,
+            gem_drop_chance: 0.2,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Io(std::io::Error),
+    Toml(toml::de::Error),
+    NotFound(String),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::Io(err) => write!(f, "config io error: {}", err),
+            ConfigError::Toml(err) => write!(f, "config toml error: {}", err),
+            ConfigError::NotFound(name) => write!(f, "config not found: {}", name),
+        }
+    }
+}
+
+impl Error for ConfigError {}
+
+impl From<std::io::Error> for ConfigError {
+    fn from(err: std::io::Error) -> Self {
+        ConfigError::Io(err)
+    }
+}
+
+impl From<toml::de::Error> for ConfigError {
+    fn from(err: toml::de::Error) -> Self {
+        ConfigError::Toml(err)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+struct SessionConfigOverrides {
+    world_size: Option<(u32, u32)>,
+    seed: Option<u64>,
+    chunk_size: Option<(u32, u32)>,
+    tree_density: Option<f32>,
+    coal_density: Option<f32>,
+    iron_density: Option<f32>,
+    diamond_density: Option<f32>,
+    cow_density: Option<f32>,
+    zombie_density: Option<f32>,
+    skeleton_density: Option<f32>,
+    zombie_spawn_rate: Option<f32>,
+    zombie_despawn_rate: Option<f32>,
+    cow_spawn_rate: Option<f32>,
+    cow_despawn_rate: Option<f32>,
+    max_steps: Option<u32>,
+    day_night_cycle: Option<bool>,
+    day_cycle_period: Option<u32>,
+    hunger_enabled: Option<bool>,
+    hunger_rate: Option<u32>,
+    thirst_enabled: Option<bool>,
+    thirst_rate: Option<u32>,
+    fatigue_enabled: Option<bool>,
+    zombie_damage_mult: Option<f32>,
+    arrow_damage_mult: Option<f32>,
+    player_damage_mult: Option<f32>,
+    cow_health: Option<u8>,
+    zombie_health: Option<u8>,
+    skeleton_health: Option<u8>,
+    view_radius: Option<u32>,
+    full_world_state: Option<bool>,
+    time_mode: Option<TimeMode>,
+    default_ticks_per_second: Option<f32>,
+    craftax: Option<CraftaxConfigOverrides>,
+}
+
+impl SessionConfigOverrides {
+    fn apply_to(self, mut base: SessionConfig) -> SessionConfig {
+        if let Some(value) = self.world_size {
+            base.world_size = value;
+        }
+        if let Some(value) = self.seed {
+            base.seed = Some(value);
+        }
+        if let Some(value) = self.chunk_size {
+            base.chunk_size = value;
+        }
+        if let Some(value) = self.tree_density {
+            base.tree_density = value;
+        }
+        if let Some(value) = self.coal_density {
+            base.coal_density = value;
+        }
+        if let Some(value) = self.iron_density {
+            base.iron_density = value;
+        }
+        if let Some(value) = self.diamond_density {
+            base.diamond_density = value;
+        }
+        if let Some(value) = self.cow_density {
+            base.cow_density = value;
+        }
+        if let Some(value) = self.zombie_density {
+            base.zombie_density = value;
+        }
+        if let Some(value) = self.skeleton_density {
+            base.skeleton_density = value;
+        }
+        if let Some(value) = self.zombie_spawn_rate {
+            base.zombie_spawn_rate = value;
+        }
+        if let Some(value) = self.zombie_despawn_rate {
+            base.zombie_despawn_rate = value;
+        }
+        if let Some(value) = self.cow_spawn_rate {
+            base.cow_spawn_rate = value;
+        }
+        if let Some(value) = self.cow_despawn_rate {
+            base.cow_despawn_rate = value;
+        }
+        if let Some(value) = self.max_steps {
+            base.max_steps = Some(value);
+        }
+        if let Some(value) = self.day_night_cycle {
+            base.day_night_cycle = value;
+        }
+        if let Some(value) = self.day_cycle_period {
+            base.day_cycle_period = value;
+        }
+        if let Some(value) = self.hunger_enabled {
+            base.hunger_enabled = value;
+        }
+        if let Some(value) = self.hunger_rate {
+            base.hunger_rate = value;
+        }
+        if let Some(value) = self.thirst_enabled {
+            base.thirst_enabled = value;
+        }
+        if let Some(value) = self.thirst_rate {
+            base.thirst_rate = value;
+        }
+        if let Some(value) = self.fatigue_enabled {
+            base.fatigue_enabled = value;
+        }
+        if let Some(value) = self.zombie_damage_mult {
+            base.zombie_damage_mult = value;
+        }
+        if let Some(value) = self.arrow_damage_mult {
+            base.arrow_damage_mult = value;
+        }
+        if let Some(value) = self.player_damage_mult {
+            base.player_damage_mult = value;
+        }
+        if let Some(value) = self.cow_health {
+            base.cow_health = value;
+        }
+        if let Some(value) = self.zombie_health {
+            base.zombie_health = value;
+        }
+        if let Some(value) = self.skeleton_health {
+            base.skeleton_health = value;
+        }
+        if let Some(value) = self.view_radius {
+            base.view_radius = value;
+        }
+        if let Some(value) = self.full_world_state {
+            base.full_world_state = value;
+        }
+        if let Some(value) = self.time_mode {
+            base.time_mode = value;
+        }
+        if let Some(value) = self.default_ticks_per_second {
+            base.default_ticks_per_second = value;
+        }
+        if let Some(value) = self.craftax {
+            base.craftax = value.apply_to(base.craftax);
+        }
+        base
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+struct CraftaxConfigOverrides {
+    enabled: Option<bool>,
+    mobs_enabled: Option<bool>,
+    worldgen_enabled: Option<bool>,
+    items_enabled: Option<bool>,
+    combat_enabled: Option<bool>,
+    chests_enabled: Option<bool>,
+    potions_enabled: Option<bool>,
+    xp_enabled: Option<bool>,
+    achievements_enabled: Option<bool>,
+    spawn: Option<CraftaxSpawnConfigOverrides>,
+    loot: Option<CraftaxLootConfigOverrides>,
+}
+
+impl CraftaxConfigOverrides {
+    fn apply_to(self, mut base: CraftaxConfig) -> CraftaxConfig {
+        if let Some(value) = self.enabled {
+            base.enabled = value;
+        }
+        if let Some(value) = self.mobs_enabled {
+            base.mobs_enabled = value;
+        }
+        if let Some(value) = self.worldgen_enabled {
+            base.worldgen_enabled = value;
+        }
+        if let Some(value) = self.items_enabled {
+            base.items_enabled = value;
+        }
+        if let Some(value) = self.combat_enabled {
+            base.combat_enabled = value;
+        }
+        if let Some(value) = self.chests_enabled {
+            base.chests_enabled = value;
+        }
+        if let Some(value) = self.potions_enabled {
+            base.potions_enabled = value;
+        }
+        if let Some(value) = self.xp_enabled {
+            base.xp_enabled = value;
+        }
+        if let Some(value) = self.achievements_enabled {
+            base.achievements_enabled = value;
+        }
+        if let Some(value) = self.spawn {
+            base.spawn = value.apply_to(base.spawn);
+        }
+        if let Some(value) = self.loot {
+            base.loot = value.apply_to(base.loot);
+        }
+        base
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+struct CraftaxSpawnConfigOverrides {
+    sapphire_density: Option<f32>,
+    ruby_density: Option<f32>,
+    chest_density: Option<f32>,
+    orc_soldier_density: Option<f32>,
+    orc_mage_density: Option<f32>,
+    knight_density: Option<f32>,
+    knight_archer_density: Option<f32>,
+    troll_density: Option<f32>,
+    bat_density: Option<f32>,
+    snail_density: Option<f32>,
+}
+
+impl CraftaxSpawnConfigOverrides {
+    fn apply_to(self, mut base: CraftaxSpawnConfig) -> CraftaxSpawnConfig {
+        if let Some(value) = self.sapphire_density {
+            base.sapphire_density = value;
+        }
+        if let Some(value) = self.ruby_density {
+            base.ruby_density = value;
+        }
+        if let Some(value) = self.chest_density {
+            base.chest_density = value;
+        }
+        if let Some(value) = self.orc_soldier_density {
+            base.orc_soldier_density = value;
+        }
+        if let Some(value) = self.orc_mage_density {
+            base.orc_mage_density = value;
+        }
+        if let Some(value) = self.knight_density {
+            base.knight_density = value;
+        }
+        if let Some(value) = self.knight_archer_density {
+            base.knight_archer_density = value;
+        }
+        if let Some(value) = self.troll_density {
+            base.troll_density = value;
+        }
+        if let Some(value) = self.bat_density {
+            base.bat_density = value;
+        }
+        if let Some(value) = self.snail_density {
+            base.snail_density = value;
+        }
+        base
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+struct CraftaxLootConfigOverrides {
+    potion_drop_chance: Option<f32>,
+    arrow_drop_chance: Option<f32>,
+    gem_drop_chance: Option<f32>,
+}
+
+impl CraftaxLootConfigOverrides {
+    fn apply_to(self, mut base: CraftaxLootConfig) -> CraftaxLootConfig {
+        if let Some(value) = self.potion_drop_chance {
+            base.potion_drop_chance = value;
+        }
+        if let Some(value) = self.arrow_drop_chance {
+            base.arrow_drop_chance = value;
+        }
+        if let Some(value) = self.gem_drop_chance {
+            base.gem_drop_chance = value;
+        }
+        base
+    }
+}
+#[derive(Clone, Debug, Deserialize, Default)]
+struct SessionConfigFile {
+    base: Option<String>,
+    #[serde(flatten)]
+    overrides: SessionConfigOverrides,
 }
 
 impl Default for SessionConfig {
@@ -146,6 +540,7 @@ impl Default for SessionConfig {
             full_world_state: false,
             time_mode: TimeMode::Logical,
             default_ticks_per_second: 10.0,
+            craftax: CraftaxConfig::default(),
         }
     }
 }
@@ -202,4 +597,58 @@ impl SessionConfig {
             ..Default::default()
         }
     }
+
+    pub fn from_toml_str(contents: &str) -> Result<Self, ConfigError> {
+        let parsed: SessionConfigFile = toml::from_str(contents)?;
+        let base = if let Some(name) = parsed.base {
+            SessionConfig::load_named(&name)?
+        } else {
+            SessionConfig::default()
+        };
+        Ok(parsed.overrides.apply_to(base))
+    }
+
+    pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        let contents = fs::read_to_string(path)?;
+        SessionConfig::from_toml_str(&contents)
+    }
+
+    pub fn load_named(name: &str) -> Result<Self, ConfigError> {
+        let path = resolve_named_config_path(name)
+            .ok_or_else(|| ConfigError::NotFound(name.to_string()))?;
+        SessionConfig::load_from_path(path)
+    }
+}
+
+fn resolve_named_config_path(name: &str) -> Option<PathBuf> {
+    let raw = PathBuf::from(name);
+    if raw.exists() {
+        return Some(raw);
+    }
+
+    let file_name = if name.ends_with(".toml") {
+        name.to_string()
+    } else {
+        format!("{}.toml", name)
+    };
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join(&file_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        let candidate = cwd.join("configs").join(&file_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    if let Some(dir) = std::env::var_os("CRAFTER_CONFIG_DIR").map(PathBuf::from) {
+        let candidate = dir.join(&file_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }

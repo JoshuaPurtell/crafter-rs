@@ -7,12 +7,16 @@
 #[cfg(feature = "png")]
 use image::{ImageBuffer, RgbImage, Rgba, RgbaImage};
 
+#[cfg(feature = "png")]
 use crate::entity::GameObject;
+#[cfg(feature = "png")]
 use crate::material::Material;
 use crate::session::GameState;
+#[cfg(feature = "png")]
 use crate::world::WorldView;
 
 /// Embedded sprite data (16x16 PNG files from Python Crafter)
+#[cfg(feature = "png")]
 mod sprites {
     // Terrain sprites
     pub const GRASS: &[u8] = include_bytes!("../assets/grass.png");
@@ -23,6 +27,9 @@ mod sprites {
     pub const COAL: &[u8] = include_bytes!("../assets/coal.png");
     pub const IRON: &[u8] = include_bytes!("../assets/iron.png");
     pub const DIAMOND: &[u8] = include_bytes!("../assets/diamond.png");
+    pub const SAPPHIRE: &[u8] = include_bytes!("../assets/sapphire.png");
+    pub const RUBY: &[u8] = include_bytes!("../assets/ruby.png");
+    pub const CHEST: &[u8] = include_bytes!("../assets/chest.png");
     pub const TABLE: &[u8] = include_bytes!("../assets/table.png");
     pub const FURNACE: &[u8] = include_bytes!("../assets/furnace.png");
     pub const LAVA: &[u8] = include_bytes!("../assets/lava.png");
@@ -30,6 +37,7 @@ mod sprites {
     pub const WOOD: &[u8] = include_bytes!("../assets/wood.png");
     pub const LEAVES: &[u8] = include_bytes!("../assets/leaves.png");
     pub const SAPLING: &[u8] = include_bytes!("../assets/sapling.png");
+    pub const UNKNOWN: &[u8] = include_bytes!("../assets/unknown.png");
 
     // Entity sprites
     pub const PLAYER: &[u8] = include_bytes!("../assets/player.png");
@@ -40,8 +48,18 @@ mod sprites {
     pub const COW: &[u8] = include_bytes!("../assets/cow.png");
     pub const ZOMBIE: &[u8] = include_bytes!("../assets/zombie.png");
     pub const SKELETON: &[u8] = include_bytes!("../assets/skeleton.png");
+    pub const ORC_SOLDIER: &[u8] = include_bytes!("../assets/orc_soldier.png");
+    pub const ORC_MAGE: &[u8] = include_bytes!("../assets/orc_mage.png");
+    pub const KNIGHT: &[u8] = include_bytes!("../assets/knight.png");
+    pub const KNIGHT_ARCHER: &[u8] = include_bytes!("../assets/knight_archer.png");
+    pub const TROLL: &[u8] = include_bytes!("../assets/troll.png");
+    pub const BAT: &[u8] = include_bytes!("../assets/bat.png");
+    pub const SNAIL: &[u8] = include_bytes!("../assets/snail.png");
     pub const PLANT: &[u8] = include_bytes!("../assets/plant.png");
     pub const PLANT_RIPE: &[u8] = include_bytes!("../assets/plant-ripe.png");
+    pub const ARROW: &[u8] = include_bytes!("../assets/arrow-up.png");
+    pub const FIREBALL: &[u8] = include_bytes!("../assets/fireball.png");
+    pub const ICEBALL: &[u8] = include_bytes!("../assets/iceball.png");
 
     // Status bar icons
     pub const HEALTH: &[u8] = include_bytes!("../assets/health.png");
@@ -64,9 +82,12 @@ mod sprites {
     pub const WOOD_PICKAXE: &[u8] = include_bytes!("../assets/wood_pickaxe.png");
     pub const STONE_PICKAXE: &[u8] = include_bytes!("../assets/stone_pickaxe.png");
     pub const IRON_PICKAXE: &[u8] = include_bytes!("../assets/iron_pickaxe.png");
+    pub const DIAMOND_PICKAXE: &[u8] = include_bytes!("../assets/diamond_pickaxe.png");
     pub const WOOD_SWORD: &[u8] = include_bytes!("../assets/wood_sword.png");
     pub const STONE_SWORD: &[u8] = include_bytes!("../assets/stone_sword.png");
     pub const IRON_SWORD: &[u8] = include_bytes!("../assets/iron_sword.png");
+    pub const DIAMOND_SWORD: &[u8] = include_bytes!("../assets/diamond_sword.png");
+    pub const BOW: &[u8] = include_bytes!("../assets/bow.png");
 }
 
 /// Sprite cache for decoded images
@@ -94,6 +115,9 @@ impl SpriteCache {
         self.load("coal", sprites::COAL);
         self.load("iron", sprites::IRON);
         self.load("diamond", sprites::DIAMOND);
+        self.load("sapphire", sprites::SAPPHIRE);
+        self.load("ruby", sprites::RUBY);
+        self.load("chest", sprites::CHEST);
         self.load("table", sprites::TABLE);
         self.load("furnace", sprites::FURNACE);
         self.load("lava", sprites::LAVA);
@@ -101,6 +125,7 @@ impl SpriteCache {
         self.load("wood", sprites::WOOD);
         self.load("leaves", sprites::LEAVES);
         self.load("sapling", sprites::SAPLING);
+        self.load("unknown", sprites::UNKNOWN);
         self.load("player", sprites::PLAYER);
         self.load("player-up", sprites::PLAYER_UP);
         self.load("player-down", sprites::PLAYER_DOWN);
@@ -109,8 +134,18 @@ impl SpriteCache {
         self.load("cow", sprites::COW);
         self.load("zombie", sprites::ZOMBIE);
         self.load("skeleton", sprites::SKELETON);
+        self.load("orc_soldier", sprites::ORC_SOLDIER);
+        self.load("orc_mage", sprites::ORC_MAGE);
+        self.load("knight", sprites::KNIGHT);
+        self.load("knight_archer", sprites::KNIGHT_ARCHER);
+        self.load("troll", sprites::TROLL);
+        self.load("bat", sprites::BAT);
+        self.load("snail", sprites::SNAIL);
         self.load("plant", sprites::PLANT);
         self.load("plant-ripe", sprites::PLANT_RIPE);
+        self.load("arrow", sprites::ARROW);
+        self.load("fireball", sprites::FIREBALL);
+        self.load("iceball", sprites::ICEBALL);
         self.load("health", sprites::HEALTH);
         self.load("food", sprites::FOOD);
         self.load("drink", sprites::DRINK);
@@ -129,9 +164,12 @@ impl SpriteCache {
         self.load("wood_pickaxe", sprites::WOOD_PICKAXE);
         self.load("stone_pickaxe", sprites::STONE_PICKAXE);
         self.load("iron_pickaxe", sprites::IRON_PICKAXE);
+        self.load("diamond_pickaxe", sprites::DIAMOND_PICKAXE);
         self.load("wood_sword", sprites::WOOD_SWORD);
         self.load("stone_sword", sprites::STONE_SWORD);
         self.load("iron_sword", sprites::IRON_SWORD);
+        self.load("diamond_sword", sprites::DIAMOND_SWORD);
+        self.load("bow", sprites::BOW);
     }
 
     fn load(&mut self, name: &'static str, data: &[u8]) {
@@ -205,12 +243,14 @@ impl ImageRendererConfig {
 /// PNG image renderer using sprites
 #[cfg(feature = "png")]
 pub struct ImageRenderer {
+    #[allow(dead_code)]
     config: ImageRendererConfig,
     sprites: SpriteCache,
 }
 
 #[cfg(not(feature = "png"))]
 pub struct ImageRenderer {
+    #[allow(dead_code)]
     config: ImageRendererConfig,
 }
 
@@ -283,11 +323,14 @@ impl ImageRenderer {
         // Render terrain
         for vy in 0..view_size as usize {
             for vx in 0..view_size as usize {
-                let mat = view
-                    .get_material(vx as i32, vy as i32)
-                    .unwrap_or(Material::Stone);
-
-                let sprite_name = self.material_sprite(mat);
+                let sprite_name = if !view.is_in_bounds(vx as i32, vy as i32) {
+                    "unknown"
+                } else {
+                    let mat = view
+                        .get_material(vx as i32, vy as i32)
+                        .unwrap_or(Material::Stone);
+                    self.material_sprite(mat)
+                };
 
                 if let Some(sprite) = self.sprites.get(sprite_name) {
                     self.draw_sprite(
@@ -622,10 +665,13 @@ impl ImageRenderer {
             Material::Coal => "coal",
             Material::Iron => "iron",
             Material::Diamond => "diamond",
+            Material::Sapphire => "sapphire",
+            Material::Ruby => "ruby",
             Material::Table => "table",
             Material::Furnace => "furnace",
             Material::Lava => "lava",
             Material::Path => "path",
+            Material::Chest => "chest",
         }
     }
 
@@ -635,6 +681,15 @@ impl ImageRenderer {
             GameObject::Cow(_) => "cow",
             GameObject::Zombie(_) => "zombie",
             GameObject::Skeleton(_) => "skeleton",
+            GameObject::CraftaxMob(mob) => match mob.kind {
+                crate::entity::CraftaxMobKind::OrcSoldier => "orc_soldier",
+                crate::entity::CraftaxMobKind::OrcMage => "orc_mage",
+                crate::entity::CraftaxMobKind::Knight => "knight",
+                crate::entity::CraftaxMobKind::KnightArcher => "knight_archer",
+                crate::entity::CraftaxMobKind::Troll => "troll",
+                crate::entity::CraftaxMobKind::Bat => "bat",
+                crate::entity::CraftaxMobKind::Snail => "snail",
+            },
             GameObject::Plant(p) => {
                 if p.grown >= 300 {
                     "plant-ripe"
@@ -642,7 +697,11 @@ impl ImageRenderer {
                     "plant"
                 }
             }
-            GameObject::Arrow(_) => "player", // Use player sprite as placeholder
+            GameObject::Arrow(arrow) => match arrow.kind {
+                crate::entity::ProjectileKind::Arrow => "arrow",
+                crate::entity::ProjectileKind::Fireball => "fireball",
+                crate::entity::ProjectileKind::Iceball => "iceball",
+            },
             GameObject::Player(_) => "player",
         }
     }

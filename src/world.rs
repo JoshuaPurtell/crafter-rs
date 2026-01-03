@@ -174,6 +174,7 @@ impl World {
                     | GameObject::Cow(_)
                     | GameObject::Zombie(_)
                     | GameObject::Skeleton(_)
+                    | GameObject::CraftaxMob(_)
             )
         } else {
             true
@@ -253,6 +254,7 @@ impl World {
         let size = (radius * 2 + 1) as usize;
 
         let mut materials = vec![Material::Water; size * size];
+        let mut in_bounds = vec![false; size * size];
         let mut objects = Vec::new();
 
         for dy in -r..=r {
@@ -264,6 +266,7 @@ impl World {
 
                 if let Some(mat) = self.get_material(world_pos) {
                     materials[view_idx] = mat;
+                    in_bounds[view_idx] = true;
                 }
 
                 if let Some(obj) = self.get_object_at(world_pos) {
@@ -276,6 +279,7 @@ impl World {
             center,
             radius,
             materials,
+            in_bounds,
             objects,
         }
     }
@@ -293,6 +297,8 @@ pub struct WorldView {
     pub center: Position,
     pub radius: u32,
     pub materials: Vec<Material>,
+    #[serde(default)]
+    pub in_bounds: Vec<bool>,
     pub objects: Vec<(i32, i32, GameObject)>,
 }
 
@@ -304,12 +310,22 @@ impl WorldView {
 
     /// Get material at view-local position
     pub fn get_material(&self, x: i32, y: i32) -> Option<Material> {
-        let r = self.radius as i32;
+        let _r = self.radius as i32;
         if x >= 0 && x < self.size() as i32 && y >= 0 && y < self.size() as i32 {
             let idx = y as usize * self.size() + x as usize;
             Some(self.materials[idx])
         } else {
             None
+        }
+    }
+
+    pub fn is_in_bounds(&self, x: i32, y: i32) -> bool {
+        let size = self.size() as i32;
+        if x >= 0 && x < size && y >= 0 && y < size {
+            let idx = y as usize * self.size() + x as usize;
+            *self.in_bounds.get(idx).unwrap_or(&false)
+        } else {
+            false
         }
     }
 }

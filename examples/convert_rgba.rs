@@ -1,7 +1,9 @@
 //! Convert raw RGBA file to PNG for inspection
+#[cfg(feature = "png")]
 use image::RgbaImage;
 use std::fs;
 
+#[cfg(feature = "png")]
 fn main() {
     // Read the debug info
     let info = fs::read_to_string("/tmp/crafter_tui_frame_debug.txt")
@@ -53,3 +55,6 @@ fn main() {
         println!("ERROR: Failed to create image - dimension mismatch");
     }
 }
+
+#[cfg(not(feature = "png"))]
+fn main() {}

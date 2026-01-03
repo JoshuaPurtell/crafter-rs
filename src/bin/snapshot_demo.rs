@@ -17,6 +17,9 @@ fn main() {
         seed: Some(777),
         actions: vec![],
         view_size: None,
+        config_name: None,
+        config_path: None,
+        config_toml: None,
     });
 
     print_snapshot(&response);
@@ -34,6 +37,9 @@ fn main() {
             SnapshotAction::Do,
         ],
         view_size: None,
+        config_name: None,
+        config_path: None,
+        config_toml: None,
     });
 
     print_snapshot(&response);
@@ -61,6 +67,9 @@ fn main() {
             SnapshotAction::Do,
         ],
         view_size: None,
+        config_name: None,
+        config_path: None,
+        config_toml: None,
     });
 
     print_snapshot(&response);
@@ -76,6 +85,9 @@ fn main() {
             SnapshotAction::MakeWoodPickaxe,
         ],
         view_size: None,
+        config_name: None,
+        config_path: None,
+        config_toml: None,
     });
 
     print_snapshot(&response);

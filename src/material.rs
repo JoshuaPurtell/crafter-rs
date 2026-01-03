@@ -31,6 +31,12 @@ pub enum Material {
     Table = 10,
     /// Furnace - enables iron smelting
     Furnace = 11,
+    /// Sapphire ore - craftax addon
+    Sapphire = 12,
+    /// Ruby ore - craftax addon
+    Ruby = 13,
+    /// Chest block - craftax addon
+    Chest = 14,
 }
 
 impl Material {
@@ -58,6 +64,8 @@ impl Material {
                 | Material::Coal
                 | Material::Iron
                 | Material::Diamond
+                | Material::Sapphire
+                | Material::Ruby
         )
     }
 
@@ -77,6 +85,7 @@ impl Material {
             Material::Stone | Material::Coal => Some(1), // Wood pickaxe
             Material::Iron => Some(2),                   // Stone pickaxe
             Material::Diamond => Some(3),                // Iron pickaxe
+            Material::Sapphire | Material::Ruby => Some(4), // Diamond pickaxe
             _ => None,
         }
     }
@@ -85,7 +94,12 @@ impl Material {
     pub fn mined_replacement(&self) -> Material {
         match self {
             Material::Tree => Material::Grass,
-            Material::Stone | Material::Coal | Material::Iron | Material::Diamond => Material::Path,
+            Material::Stone
+            | Material::Coal
+            | Material::Iron
+            | Material::Diamond
+            | Material::Sapphire
+            | Material::Ruby => Material::Path,
             Material::Table | Material::Furnace => Material::Grass,
             _ => *self,
         }
@@ -106,6 +120,9 @@ impl Material {
             9 => Some(Material::Diamond),
             10 => Some(Material::Table),
             11 => Some(Material::Furnace),
+            12 => Some(Material::Sapphire),
+            13 => Some(Material::Ruby),
+            14 => Some(Material::Chest),
             _ => None,
         }
     }
@@ -125,6 +142,9 @@ impl Material {
             Material::Diamond => 'd',
             Material::Table => 't',
             Material::Furnace => 'f',
+            Material::Sapphire => 's',
+            Material::Ruby => 'r',
+            Material::Chest => 'H',
         }
     }
 
@@ -143,6 +163,9 @@ impl Material {
             Material::Diamond => (0, 255, 255),    // Cyan
             Material::Table => (139, 90, 43),      // Brown
             Material::Furnace => (169, 169, 169),  // Dark gray
+            Material::Sapphire => (15, 82, 186),   // Sapphire blue
+            Material::Ruby => (224, 17, 95),       // Ruby red
+            Material::Chest => (184, 115, 51),     // Chest bronze
         }
     }
 }

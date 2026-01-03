@@ -6,6 +6,7 @@
 //! - Player-centered terrain generation
 
 use crate::config::SessionConfig;
+use crate::craftax;
 use crate::entity::{Cow, GameObject, Player, Skeleton, Zombie};
 use crate::material::Material;
 use crate::world::World;
@@ -63,6 +64,7 @@ impl WorldGenerator {
 
         // Second pass: spawn objects
         self.spawn_objects(&mut world, player_pos, &tunnels);
+        craftax::worldgen::apply(&mut world, &mut self.rng, &self.config, player_pos, &tunnels);
 
         world
     }
@@ -162,17 +164,24 @@ impl WorldGenerator {
         }
 
         // Coal: simplex(x, y, 1, 8) > 0 and random > 0.85
-        if self.simplex3_single(x, y, 1.0, 8.0) > 0.0 && self.rng.gen::<f64>() > 0.85 {
+        let coal_threshold = scaled_threshold(0.15, self.config.coal_density);
+        if self.simplex3_single(x, y, 1.0, 8.0) > 0.0
+            && self.rng.gen::<f64>() > coal_threshold
+        {
             return Material::Coal;
         }
 
         // Iron: simplex(x, y, 2, 6) > 0.4 and random > 0.75
-        if self.simplex3_single(x, y, 2.0, 6.0) > 0.4 && self.rng.gen::<f64>() > 0.75 {
+        let iron_threshold = scaled_threshold(0.25, self.config.iron_density);
+        if self.simplex3_single(x, y, 2.0, 6.0) > 0.4
+            && self.rng.gen::<f64>() > iron_threshold
+        {
             return Material::Iron;
         }
 
         // Diamond: mountain > 0.18 and random > 0.994
-        if mountain > 0.18 && self.rng.gen::<f64>() > 0.994 {
+        let diamond_threshold = scaled_threshold(0.006, self.config.diamond_density);
+        if mountain > 0.18 && self.rng.gen::<f64>() > diamond_threshold {
             return Material::Diamond;
         }
 
@@ -188,7 +197,10 @@ impl WorldGenerator {
     /// Generate grassland material
     fn generate_grassland_material(&mut self, x: f64, y: f64) -> Material {
         // Tree: simplex(x, y, 5, 7) > 0 and random > 0.8
-        if self.simplex3_single(x, y, 5.0, 7.0) > 0.0 && self.rng.gen::<f64>() > 0.8 {
+        let tree_threshold = scaled_threshold(0.2, self.config.tree_density);
+        if self.simplex3_single(x, y, 5.0, 7.0) > 0.0
+            && self.rng.gen::<f64>() > tree_threshold
+        {
             Material::Tree
         } else {
             Material::Grass
@@ -214,21 +226,27 @@ impl WorldGenerator {
                 }
 
                 // Cow on grass if dist > 3 and random > 0.985 (~1.5% chance)
-                if mat == Material::Grass && dist > 3.0 && self.rng.gen::<f64>() > 0.985 {
+                let cow_threshold = scaled_threshold(0.015, self.config.cow_density);
+                if mat == Material::Grass
+                    && dist > 3.0
+                    && self.rng.gen::<f64>() > cow_threshold
+                {
                     let cow = Cow::with_health(pos, self.config.cow_health);
                     world.add_object(GameObject::Cow(cow));
                 }
 
                 // Zombie if dist > 10 and random > 0.993 (~0.7% chance)
-                if dist > 10.0 && self.rng.gen::<f64>() > 0.993 {
+                let zombie_threshold = scaled_threshold(0.007, self.config.zombie_density);
+                if dist > 10.0 && self.rng.gen::<f64>() > zombie_threshold {
                     let zombie = Zombie::with_health(pos, self.config.zombie_health);
                     world.add_object(GameObject::Zombie(zombie));
                 }
 
                 // Skeleton on tunnel paths if random > 0.95 (~5% chance)
+                let skeleton_threshold = scaled_threshold(0.05, self.config.skeleton_density);
                 if mat == Material::Path
                     && tunnels[x as usize][y as usize]
-                    && self.rng.gen::<f64>() > 0.95
+                    && self.rng.gen::<f64>() > skeleton_threshold
                 {
                     let skeleton = Skeleton::with_health(pos, self.config.skeleton_health);
                     world.add_object(GameObject::Skeleton(skeleton));
@@ -236,6 +254,12 @@ impl WorldGenerator {
             }
         }
     }
+}
+
+fn scaled_threshold(base_probability: f64, multiplier: f32) -> f64 {
+    let mult = if multiplier < 0.0 { 0.0 } else { multiplier as f64 };
+    let probability = (base_probability * mult).min(1.0);
+    1.0 - probability
 }
 
 #[cfg(test)]
@@ -356,12 +380,12 @@ mod tests {
 
         // Count mobs
         let mut cows = 0;
-        let mut zombies = 0;
+        let mut _zombies = 0;
 
         for obj in world.objects.values() {
             match obj {
                 GameObject::Cow(_) => cows += 1,
-                GameObject::Zombie(_) => zombies += 1,
+                GameObject::Zombie(_) => _zombies += 1,
                 _ => {}
             }
         }
@@ -426,8 +450,11 @@ mod tests {
                     Material::Coal => 'c',
                     Material::Iron => 'i',
                     Material::Diamond => 'D',
-                    Material::Lava => 'L',
-                    Material::Path => '=',
+                    Material::Sapphire => 's',
+                    Material::Ruby => 'r',
+                    Material::Chest => 'H',
+                    Material::Lava => '%',
+                    Material::Path => '_',
                     Material::Table => '+',
                     Material::Furnace => 'F',
                 };

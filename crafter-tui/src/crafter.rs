@@ -6,10 +6,13 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent};
 use crafter_core::image_renderer::{ImageRenderer, ImageRendererConfig};
 use crafter_core::recording::{Recording, RecordingOptions, RecordingSession, ReplaySession};
-use crafter_core::SaveData;
+use crafter_core::{Achievements, SaveData};
 use crafter_core::renderer::{Renderer, TextRenderer};
 use crafter_core::{Action, SessionConfig};
 use opentui_sys as ot;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::process::Command;
 
 pub const APP_ID: &str = "crafter";
 pub const NAME: &str = "Crafter";
@@ -46,6 +49,7 @@ pub enum CrafterUpdate {
     Status { message: String },
     Running { running: bool },
     Paused { paused: bool },
+    InputCapture { capture: bool },
     Frame {
         lines: Vec<String>,
         rgba_data: Option<Vec<u8>>,
@@ -82,13 +86,35 @@ pub struct InventoryData {
     pub coal: u8,
     pub iron: u8,
     pub diamond: u8,
+    pub sapphire: u8,
+    pub ruby: u8,
     // Tools
     pub wood_pickaxe: u8,
     pub stone_pickaxe: u8,
     pub iron_pickaxe: u8,
+    pub diamond_pickaxe: u8,
     pub wood_sword: u8,
     pub stone_sword: u8,
     pub iron_sword: u8,
+    pub diamond_sword: u8,
+    pub bow: u8,
+    pub arrows: u8,
+    // Armor
+    pub armor_helmet: u8,
+    pub armor_chestplate: u8,
+    pub armor_leggings: u8,
+    pub armor_boots: u8,
+    // Potions
+    pub potion_red: u8,
+    pub potion_green: u8,
+    pub potion_blue: u8,
+    pub potion_pink: u8,
+    pub potion_cyan: u8,
+    pub potion_yellow: u8,
+    // Progression
+    pub xp: u32,
+    pub level: u8,
+    pub stat_points: u8,
 }
 
 impl InventoryData {
@@ -100,12 +126,31 @@ impl InventoryData {
             coal: inv.coal,
             iron: inv.iron,
             diamond: inv.diamond,
+            sapphire: inv.sapphire,
+            ruby: inv.ruby,
             wood_pickaxe: inv.wood_pickaxe,
             stone_pickaxe: inv.stone_pickaxe,
             iron_pickaxe: inv.iron_pickaxe,
+            diamond_pickaxe: inv.diamond_pickaxe,
             wood_sword: inv.wood_sword,
             stone_sword: inv.stone_sword,
             iron_sword: inv.iron_sword,
+            diamond_sword: inv.diamond_sword,
+            bow: inv.bow,
+            arrows: inv.arrows,
+            armor_helmet: inv.armor_helmet,
+            armor_chestplate: inv.armor_chestplate,
+            armor_leggings: inv.armor_leggings,
+            armor_boots: inv.armor_boots,
+            potion_red: inv.potion_red,
+            potion_green: inv.potion_green,
+            potion_blue: inv.potion_blue,
+            potion_pink: inv.potion_pink,
+            potion_cyan: inv.potion_cyan,
+            potion_yellow: inv.potion_yellow,
+            xp: inv.xp,
+            level: inv.level,
+            stat_points: inv.stat_points,
         }
     }
 }
@@ -118,6 +163,8 @@ pub struct RecordingInfo {
     pub total_steps: u64,
     pub total_reward: f32,
     pub timestamp: u64,
+    pub total_achievements: u32,
+    pub unique_achievements: u32,
 }
 
 pub struct CrafterState {
@@ -149,6 +196,8 @@ pub struct CrafterState {
     pub replay_step: usize,
     pub replay_total: usize,
     pub show_recordings: bool,
+    pub recordings_search: String,
+    pub recordings_search_active: bool,
     // Menus
     pub show_craft_menu: bool,
     pub craft_selection: usize,
@@ -158,6 +207,10 @@ pub struct CrafterState {
     pub show_config_menu: bool,
     pub config_selection: usize,
     pub config: CrafterConfig,
+    pub profile_names: Vec<String>,
+    pub profile_index: usize,
+    pub rule_configs: Vec<RuleConfigEntry>,
+    pub rule_config_index: usize,
 }
 
 /// Craft menu items
@@ -165,9 +218,15 @@ pub const CRAFT_ITEMS: &[(&str, Action, &str)] = &[
     ("Wood Pickaxe", Action::MakeWoodPickaxe, "table + 1 wood"),
     ("Stone Pickaxe", Action::MakeStonePickaxe, "table + 1 wood + 1 stone"),
     ("Iron Pickaxe", Action::MakeIronPickaxe, "table + furnace + wood/coal/iron"),
+    ("Diamond Pickaxe", Action::MakeDiamondPickaxe, "table + wood + diamond"),
     ("Wood Sword", Action::MakeWoodSword, "table + 1 wood"),
     ("Stone Sword", Action::MakeStoneSword, "table + 1 wood + 1 stone"),
     ("Iron Sword", Action::MakeIronSword, "table + furnace + wood/coal/iron"),
+    ("Diamond Sword", Action::MakeDiamondSword, "table + wood + 2 diamond"),
+    ("Iron Armor", Action::MakeIronArmor, "table + furnace + 3 iron + 3 coal"),
+    ("Diamond Armor", Action::MakeDiamondArmor, "table + 3 diamond"),
+    ("Bow", Action::MakeBow, "table + 2 wood"),
+    ("Arrows", Action::MakeArrow, "table + 1 wood + 1 stone"),
 ];
 
 /// Place menu items
@@ -179,7 +238,7 @@ pub const PLACE_ITEMS: &[(&str, Action, &str)] = &[
 ];
 
 /// Game configuration
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CrafterConfig {
     pub tick_rate: u32,      // Hz (1-30) - only used in real-time mode
     pub world_width: u32,    // 16-64
@@ -188,6 +247,8 @@ pub struct CrafterConfig {
     pub seed: u64,           // fixed seed value
     pub graphics_mode: bool, // true = pixel graphics, false = ASCII
     pub logical_time: bool,  // true = step only on input (for AI), false = real-time
+    #[serde(default = "default_rule_config_name")]
+    pub rule_config: String, // SessionConfig TOML name/path
 }
 
 impl Default for CrafterConfig {
@@ -200,24 +261,37 @@ impl Default for CrafterConfig {
             seed: 42,
             graphics_mode: true,
             logical_time: false,
+            rule_config: default_rule_config_name(),
         }
     }
 }
 
+fn default_rule_config_name() -> String {
+    "classic".to_string()
+}
+
 /// Config menu items
 pub const CONFIG_ITEMS: &[&str] = &[
-    "Time Mode",      // 0: Logical (AI) vs Real-time
-    "Tick Rate",      // 1: Hz (only for real-time)
-    "World Width",    // 2
-    "World Height",   // 3
-    "Seed Mode",      // 4
-    "Seed Value",     // 5
-    "Graphics Mode",  // 6
-    "--- Start Game ---",  // 7
+    "Profile",        // 0: profile name
+    "Rule Config",    // 1: SessionConfig profile
+    "Time Mode",      // 2: Logical (AI) vs Real-time
+    "Tick Rate",      // 3: Hz (only for real-time)
+    "World Width",    // 4
+    "World Height",   // 5
+    "Seed Mode",      // 6
+    "Seed Value",     // 7
+    "Graphics Mode",  // 8
+    "--- Start Game ---",  // 9
 ];
 
 impl CrafterState {
     pub fn new() -> Self {
+        let (profile_names, profile_index, config) = load_initial_profile();
+        let rule_configs = list_rule_configs();
+        let mut rule_config_index = rule_config_index(&rule_configs, &config.rule_config);
+        if rule_configs.is_empty() {
+            rule_config_index = 0;
+        }
         Self {
             running: false,
             paused: false,
@@ -245,13 +319,19 @@ impl CrafterState {
             replay_step: 0,
             replay_total: 0,
             show_recordings: false,
+            recordings_search: String::new(),
+            recordings_search_active: false,
             show_craft_menu: false,
             craft_selection: 0,
             show_place_menu: false,
             place_selection: 0,
             show_config_menu: false,
             config_selection: 0,
-            config: CrafterConfig::default(),
+            config,
+            profile_names,
+            profile_index,
+            rule_configs,
+            rule_config_index,
         }
     }
 }
@@ -262,6 +342,34 @@ fn config_dir_path(app_name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."));
     base.push(".config");
     base.push(app_name);
+    base
+}
+
+fn config_file_path() -> PathBuf {
+    let mut base = config_dir_path("crafter");
+    base.push("config.toml");
+    base
+}
+
+fn profiles_dir() -> PathBuf {
+    let mut base = config_dir_path("crafter");
+    base.push("profiles");
+    base
+}
+
+fn profile_path(profile_name: &str) -> PathBuf {
+    if profile_name == "default" {
+        config_file_path()
+    } else {
+        let mut base = profiles_dir();
+        base.push(format!("{}.toml", profile_name));
+        base
+    }
+}
+
+fn rule_configs_dir() -> PathBuf {
+    let mut base = config_dir_path("crafter");
+    base.push("rules");
     base
 }
 
@@ -278,6 +386,340 @@ pub fn mission_control_recordings_dir() -> PathBuf {
     base
 }
 
+#[derive(Clone)]
+pub struct RuleConfigEntry {
+    name: String,
+    path: Option<PathBuf>,
+    editable: bool,
+}
+
+fn list_profiles() -> Vec<String> {
+    let mut profiles = Vec::new();
+    let dir = profiles_dir();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "toml").unwrap_or(false) {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    profiles.push(stem.to_string());
+                }
+            }
+        }
+    }
+    profiles.sort();
+    profiles
+}
+
+fn list_rule_configs() -> Vec<RuleConfigEntry> {
+    let mut configs: BTreeMap<String, RuleConfigEntry> = BTreeMap::new();
+
+    for dir in builtin_rule_dirs() {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "toml").unwrap_or(false) {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        configs.entry(stem.to_string()).or_insert(RuleConfigEntry {
+                            name: stem.to_string(),
+                            path: Some(path),
+                            editable: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let user_dir = rule_configs_dir();
+    if let Ok(entries) = std::fs::read_dir(&user_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "toml").unwrap_or(false) {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    configs.insert(
+                        stem.to_string(),
+                        RuleConfigEntry {
+                            name: stem.to_string(),
+                            path: Some(path),
+                            editable: true,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    if configs.is_empty() {
+        configs.insert(
+            default_rule_config_name(),
+            RuleConfigEntry {
+                name: default_rule_config_name(),
+                path: None,
+                editable: false,
+            },
+        );
+    }
+
+    configs.into_values().collect()
+}
+
+fn builtin_rule_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = std::env::var_os("CRAFTER_CONFIG_DIR").map(PathBuf::from) {
+        dirs.push(dir);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("configs");
+        if candidate.exists() {
+            dirs.push(candidate);
+        }
+    }
+    dirs
+}
+
+fn rule_config_index(configs: &[RuleConfigEntry], name: &str) -> usize {
+    configs
+        .iter()
+        .position(|config| config.name == name)
+        .unwrap_or(0)
+}
+
+fn selected_rule_config_name(state: &CrafterState) -> String {
+    state
+        .rule_configs
+        .get(state.rule_config_index)
+        .map(|config| config.name.clone())
+        .unwrap_or_else(default_rule_config_name)
+}
+
+fn refresh_rule_configs(state: &mut CrafterState) {
+    state.rule_configs = list_rule_configs();
+    state.rule_config_index = rule_config_index(&state.rule_configs, &state.config.rule_config);
+    if state.rule_configs.is_empty() {
+        state.rule_config_index = 0;
+    } else if state.rule_config_index >= state.rule_configs.len() {
+        state.rule_config_index = 0;
+    }
+    state.config.rule_config = selected_rule_config_name(state);
+}
+
+fn create_rule_config_from_selected(state: &mut CrafterState) -> Option<String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let name = format!("custom_{}", timestamp);
+    let mut target = rule_configs_dir();
+    let _ = std::fs::create_dir_all(&target);
+    target.push(format!("{}.toml", name));
+
+    let source = state
+        .rule_configs
+        .get(state.rule_config_index)
+        .and_then(|entry| entry.path.clone());
+
+    if let Some(source_path) = source {
+        let _ = std::fs::copy(source_path, &target);
+    } else {
+        let contents = format!("base = \"{}\"\n", default_rule_config_name());
+        let _ = std::fs::write(&target, contents);
+    }
+
+    Some(name)
+}
+
+fn delete_selected_rule_config(state: &mut CrafterState) -> bool {
+    if let Some(entry) = state.rule_configs.get(state.rule_config_index) {
+        if entry.editable {
+            if let Some(path) = &entry.path {
+                return std::fs::remove_file(path).is_ok();
+            }
+        }
+    }
+    false
+}
+
+fn edit_selected_rule_config(state: &mut CrafterState) -> bool {
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let entry = match state.rule_configs.get(state.rule_config_index) {
+        Some(entry) => entry.clone(),
+        None => return false,
+    };
+
+    let path = if entry.editable {
+        entry.path
+    } else {
+        let name = create_rule_config_from_selected(state);
+        refresh_rule_configs(state);
+        if let Some(name) = name {
+            state.rule_config_index = rule_config_index(&state.rule_configs, &name);
+        }
+        state
+            .rule_configs
+            .get(state.rule_config_index)
+            .and_then(|entry| entry.path.clone())
+    };
+
+    if let Some(path) = path {
+        let _ = Command::new(editor).arg(path).status();
+        true
+    } else {
+        false
+    }
+}
+fn load_profile_config(profile_name: &str) -> CrafterConfig {
+    let path = profile_path(profile_name);
+    if let Ok(contents) = std::fs::read_to_string(path) {
+        if let Ok(config) = toml::from_str::<CrafterConfig>(&contents) {
+            return config;
+        }
+    }
+    CrafterConfig::default()
+}
+
+fn save_profile_config(profile_name: &str, config: &CrafterConfig) {
+    let path = profile_path(profile_name);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(contents) = toml::to_string_pretty(config) {
+        let _ = std::fs::write(path, contents);
+    }
+}
+
+fn load_initial_profile() -> (Vec<String>, usize, CrafterConfig) {
+    let mut profile_names = vec!["default".to_string()];
+    profile_names.extend(list_profiles());
+    profile_names.dedup();
+    let profile_index = 0;
+    let config = load_profile_config(&profile_names[profile_index]);
+    (profile_names, profile_index, config)
+}
+
+fn load_session_config(game_config: &CrafterConfig) -> Option<SessionConfig> {
+    let name = game_config.rule_config.trim();
+    if name.is_empty() {
+        return Some(SessionConfig::default());
+    }
+
+    let direct_path = PathBuf::from(name);
+    if direct_path.exists() {
+        return SessionConfig::load_from_path(direct_path).ok();
+    }
+
+    let user_path = rule_configs_dir().join(format!("{}.toml", name));
+    if user_path.exists() {
+        return SessionConfig::load_from_path(user_path).ok();
+    }
+
+    SessionConfig::load_named(name).ok()
+}
+
+#[derive(Clone, Copy)]
+enum AchievementFilterOp {
+    Eq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+}
+
+struct RecordingsFilter {
+    total: Option<(AchievementFilterOp, u32)>,
+    unique: Option<(AchievementFilterOp, u32)>,
+}
+
+fn parse_recordings_filter(query: &str) -> RecordingsFilter {
+    let mut filter = RecordingsFilter {
+        total: None,
+        unique: None,
+    };
+
+    for token in query.split_whitespace() {
+        if let Some(expr) = token
+            .strip_prefix("total")
+            .or_else(|| token.strip_prefix("t"))
+        {
+            if let Some(parsed) = parse_filter_expr(expr) {
+                filter.total = Some(parsed);
+            }
+        } else if let Some(expr) = token
+            .strip_prefix("unique")
+            .or_else(|| token.strip_prefix("u"))
+        {
+            if let Some(parsed) = parse_filter_expr(expr) {
+                filter.unique = Some(parsed);
+            }
+        }
+    }
+
+    filter
+}
+
+fn parse_filter_expr(expr: &str) -> Option<(AchievementFilterOp, u32)> {
+    let trimmed = expr.strip_prefix(':').unwrap_or(expr);
+    let (op, rest) = if let Some(rest) = trimmed.strip_prefix(">=") {
+        (AchievementFilterOp::Gte, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("<=") {
+        (AchievementFilterOp::Lte, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('>') {
+        (AchievementFilterOp::Gt, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('<') {
+        (AchievementFilterOp::Lt, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('=') {
+        (AchievementFilterOp::Eq, rest)
+    } else {
+        (AchievementFilterOp::Eq, trimmed)
+    };
+
+    let value = rest.parse::<u32>().ok()?;
+    Some((op, value))
+}
+
+fn matches_filter(op: AchievementFilterOp, left: u32, right: u32) -> bool {
+    match op {
+        AchievementFilterOp::Eq => left == right,
+        AchievementFilterOp::Lt => left < right,
+        AchievementFilterOp::Lte => left <= right,
+        AchievementFilterOp::Gt => left > right,
+        AchievementFilterOp::Gte => left >= right,
+    }
+}
+
+fn filtered_recording_indices(recordings: &[RecordingInfo], query: &str) -> Vec<usize> {
+    if query.trim().is_empty() {
+        return (0..recordings.len()).collect();
+    }
+
+    let filter = parse_recordings_filter(query);
+    recordings
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, rec)| {
+            if let Some((op, value)) = filter.total {
+                if !matches_filter(op, rec.total_achievements, value) {
+                    return None;
+                }
+            }
+            if let Some((op, value)) = filter.unique {
+                if !matches_filter(op, rec.unique_achievements, value) {
+                    return None;
+                }
+            }
+            Some(idx)
+        })
+        .collect()
+}
+
+fn achievement_stats(achievements: &Achievements) -> (u32, u32) {
+    let total = Achievements::all_names()
+        .iter()
+        .filter_map(|name| achievements.get(name))
+        .sum();
+    let unique = achievements.total_unlocked();
+    (total, unique)
+}
+
 fn list_recordings(dir: &Path) -> Vec<RecordingInfo> {
     if !dir.exists() {
         return Vec::new();
@@ -289,6 +731,30 @@ fn list_recordings(dir: &Path) -> Vec<RecordingInfo> {
             let path = entry.path();
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 if let Ok(recording) = Recording::load_json(&path) {
+                    let (total_achievements, unique_achievements) =
+                        if let Some(last_state) = recording
+                            .steps
+                            .last()
+                            .and_then(|step| step.state_after.as_ref())
+                        {
+                            achievement_stats(&last_state.achievements)
+                        } else {
+                            let mut replay = ReplaySession::from_recording(&recording);
+                            while replay.step().is_some() {}
+                            let state = replay.get_state();
+                            achievement_stats(&state.achievements)
+                        };
+                    let timestamp = entry
+                        .metadata()
+                        .and_then(|meta| meta.modified())
+                        .and_then(|t| {
+                            t.duration_since(std::time::UNIX_EPOCH).map_err(|err| {
+                                std::io::Error::new(std::io::ErrorKind::Other, err)
+                            })
+                        })
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
                     recordings.push(RecordingInfo {
                         path: path.clone(),
                         name: path
@@ -298,18 +764,20 @@ fn list_recordings(dir: &Path) -> Vec<RecordingInfo> {
                             .to_string(),
                         total_steps: recording.total_steps,
                         total_reward: recording.total_reward,
-                        timestamp: recording
-                            .steps
-                            .first()
-                            .map(|_| 0)
-                            .unwrap_or(0),
+                        timestamp,
+                        total_achievements,
+                        unique_achievements,
                     });
                 }
             }
         }
     }
 
-    recordings.sort_by(|a, b| b.name.cmp(&a.name));
+    recordings.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| b.name.cmp(&a.name))
+    });
     recordings
 }
 
@@ -407,11 +875,27 @@ pub fn spawn_crafter_loop(
                         };
                         current_seed = seed;
 
+                        let session_config = load_session_config(&game_config).unwrap_or_else(|| {
+                            SessionConfig {
+                                world_size: (frame_width, frame_height),
+                                seed,
+                                view_radius: 3,
+                                ..Default::default()
+                            }
+                        });
                         let session_config = SessionConfig {
                             world_size: (frame_width, frame_height),
                             seed,
                             view_radius: 3,
-                            ..Default::default()
+                            time_mode: if logical_time {
+                                crafter_core::TimeMode::Logical
+                            } else {
+                                crafter_core::TimeMode::RealTime {
+                                    ticks_per_second: target_hz as f32,
+                                    pause_on_disconnect: true,
+                                }
+                            },
+                            ..session_config
                         };
                         let rec_session =
                             RecordingSession::new(session_config, RecordingOptions::minimal());
@@ -719,6 +1203,7 @@ pub fn spawn_crafter_loop(
                                 pending_action = Action::Noop;
                                 let _ = tx.send(CrafterUpdate::Running { running: true });
                                 let _ = tx.send(CrafterUpdate::Paused { paused: false });
+                                let _ = tx.send(CrafterUpdate::InputCapture { capture: true });
                                 let _ = tx.send(CrafterUpdate::ReplayMode {
                                     active: false,
                                     current_step: 0,
@@ -991,29 +1476,57 @@ pub fn handle_key(
     let mut graphics_mode_update = None;
 
     if crafter.show_recordings {
+        let filtered = filtered_recording_indices(&crafter.recordings, &crafter.recordings_search);
+        if crafter.selected_recording >= filtered.len() {
+            crafter.selected_recording = filtered.len().saturating_sub(1);
+        }
         let handled = match key.code {
             KeyCode::Esc => {
-                crafter.show_recordings = false;
+                if crafter.recordings_search_active {
+                    crafter.recordings_search_active = false;
+                } else {
+                    crafter.show_recordings = false;
+                }
                 true
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Char('/') => {
+                crafter.recordings_search_active = true;
+                true
+            }
+            KeyCode::Backspace if crafter.recordings_search_active => {
+                crafter.recordings_search.pop();
+                crafter.selected_recording = 0;
+                true
+            }
+            KeyCode::Enter => {
+                if crafter.recordings_search_active {
+                    crafter.recordings_search_active = false;
+                } else if let Some(&idx) = filtered.get(crafter.selected_recording) {
+                    if let Some(rec) = crafter.recordings.get(idx) {
+                        let _ = cmd_tx.send(CrafterCommand::StartReplay {
+                            path: rec.path.clone(),
+                        });
+                        crafter.show_recordings = false;
+                    }
+                }
+                true
+            }
+            KeyCode::Up | KeyCode::Char('k') if !crafter.recordings_search_active => {
                 if crafter.selected_recording > 0 {
                     crafter.selected_recording -= 1;
                 }
                 true
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if crafter.selected_recording + 1 < crafter.recordings.len() {
+            KeyCode::Down | KeyCode::Char('j') if !crafter.recordings_search_active => {
+                if crafter.selected_recording + 1 < filtered.len() {
                     crafter.selected_recording += 1;
                 }
                 true
             }
-            KeyCode::Enter => {
-                if let Some(rec) = crafter.recordings.get(crafter.selected_recording) {
-                    let _ = cmd_tx.send(CrafterCommand::StartReplay {
-                        path: rec.path.clone(),
-                    });
-                    crafter.show_recordings = false;
+            KeyCode::Char(ch) if crafter.recordings_search_active => {
+                if !ch.is_control() {
+                    crafter.recordings_search.push(ch);
+                    crafter.selected_recording = 0;
                 }
                 true
             }
@@ -1111,22 +1624,46 @@ pub fn handle_key(
             }
             KeyCode::Left | KeyCode::Char('h') => {
                 match crafter.config_selection {
-                    0 => crafter.config.logical_time = !crafter.config.logical_time,
+                    0 => {
+                        if !crafter.profile_names.is_empty() {
+                            if crafter.profile_index == 0 {
+                                crafter.profile_index = crafter.profile_names.len() - 1;
+                            } else {
+                                crafter.profile_index -= 1;
+                            }
+                            crafter.config = load_profile_config(
+                                &crafter.profile_names[crafter.profile_index],
+                            );
+                            refresh_rule_configs(&mut *crafter);
+                            graphics_mode_update = Some(crafter.config.graphics_mode);
+                        }
+                    }
                     1 => {
+                        if !crafter.rule_configs.is_empty() {
+                            if crafter.rule_config_index == 0 {
+                                crafter.rule_config_index = crafter.rule_configs.len() - 1;
+                            } else {
+                                crafter.rule_config_index -= 1;
+                            }
+                            crafter.config.rule_config = selected_rule_config_name(crafter);
+                        }
+                    }
+                    2 => crafter.config.logical_time = !crafter.config.logical_time,
+                    3 => {
                         crafter.config.tick_rate =
                             crafter.config.tick_rate.saturating_sub(1).max(1);
                     }
-                    2 => {
+                    4 => {
                         crafter.config.world_width =
                             crafter.config.world_width.saturating_sub(4).max(16);
                     }
-                    3 => {
+                    5 => {
                         crafter.config.world_height =
                             crafter.config.world_height.saturating_sub(4).max(16);
                     }
-                    4 => crafter.config.random_seed = !crafter.config.random_seed,
-                    5 => crafter.config.seed = crafter.config.seed.saturating_sub(1),
-                    6 => {
+                    6 => crafter.config.random_seed = !crafter.config.random_seed,
+                    7 => crafter.config.seed = crafter.config.seed.saturating_sub(1),
+                    8 => {
                         crafter.config.graphics_mode = !crafter.config.graphics_mode;
                         graphics_mode_update = Some(crafter.config.graphics_mode);
                     }
@@ -1136,14 +1673,32 @@ pub fn handle_key(
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 match crafter.config_selection {
-                    0 => crafter.config.logical_time = !crafter.config.logical_time,
-                    1 => crafter.config.tick_rate = (crafter.config.tick_rate + 1).min(30),
-                    2 => crafter.config.world_width = (crafter.config.world_width + 4).min(64),
-                    3 => crafter.config.world_height =
+                    0 => {
+                        if !crafter.profile_names.is_empty() {
+                            crafter.profile_index =
+                                (crafter.profile_index + 1) % crafter.profile_names.len();
+                            crafter.config = load_profile_config(
+                                &crafter.profile_names[crafter.profile_index],
+                            );
+                            refresh_rule_configs(&mut *crafter);
+                            graphics_mode_update = Some(crafter.config.graphics_mode);
+                        }
+                    }
+                    1 => {
+                        if !crafter.rule_configs.is_empty() {
+                            crafter.rule_config_index =
+                                (crafter.rule_config_index + 1) % crafter.rule_configs.len();
+                            crafter.config.rule_config = selected_rule_config_name(crafter);
+                        }
+                    }
+                    2 => crafter.config.logical_time = !crafter.config.logical_time,
+                    3 => crafter.config.tick_rate = (crafter.config.tick_rate + 1).min(30),
+                    4 => crafter.config.world_width = (crafter.config.world_width + 4).min(64),
+                    5 => crafter.config.world_height =
                         crafter.config.world_height.saturating_add(4).min(64),
-                    4 => crafter.config.random_seed = !crafter.config.random_seed,
-                    5 => crafter.config.seed = crafter.config.seed.saturating_add(1),
-                    6 => {
+                    6 => crafter.config.random_seed = !crafter.config.random_seed,
+                    7 => crafter.config.seed = crafter.config.seed.saturating_add(1),
+                    8 => {
                         crafter.config.graphics_mode = !crafter.config.graphics_mode;
                         graphics_mode_update = Some(crafter.config.graphics_mode);
                     }
@@ -1151,9 +1706,54 @@ pub fn handle_key(
                 }
                 true
             }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                if crafter.config_selection == 1 {
+                    if let Some(name) = create_rule_config_from_selected(crafter) {
+                        refresh_rule_configs(crafter);
+                        crafter.rule_config_index = rule_config_index(&crafter.rule_configs, &name);
+                        crafter.config.rule_config = name;
+                        crafter.status = "Created rule config".to_string();
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if crafter.config_selection == 1 {
+                    if delete_selected_rule_config(crafter) {
+                        refresh_rule_configs(crafter);
+                        crafter.status = "Deleted rule config".to_string();
+                    } else {
+                        crafter.status = "Cannot delete rule config".to_string();
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Char('e') | KeyCode::Char('E') => {
+                if crafter.config_selection == 1 {
+                    if edit_selected_rule_config(crafter) {
+                        refresh_rule_configs(crafter);
+                        crafter.status = "Edited rule config".to_string();
+                    } else {
+                        crafter.status = "Cannot edit rule config".to_string();
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if crafter.config_selection == CONFIG_ITEMS.len() - 1 {
                     crafter.show_config_menu = false;
+                    if let Some(profile_name) =
+                        crafter.profile_names.get(crafter.profile_index)
+                    {
+                        save_profile_config(profile_name, &crafter.config);
+                    }
+                    crafter.config.rule_config = selected_rule_config_name(crafter);
                     let _ = cmd_tx.send(CrafterCommand::Start {
                         config: crafter.config.clone(),
                     });
@@ -1303,6 +1903,34 @@ pub fn handle_key(
             let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeIronSword));
             true
         }
+        KeyCode::Char('g') | KeyCode::Char('G') if crafter.input_capture => {
+            let _ = cmd_tx.send(CrafterCommand::Action(Action::ShootArrow));
+            true
+        }
+        KeyCode::Char('q') | KeyCode::Char('Q') if crafter.input_capture => {
+            let _ = cmd_tx.send(CrafterCommand::Action(Action::DrinkPotionRed));
+            true
+        }
+        KeyCode::Char('e') | KeyCode::Char('E') if crafter.input_capture => {
+            let _ = cmd_tx.send(CrafterCommand::Action(Action::DrinkPotionGreen));
+            true
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') if crafter.input_capture => {
+            let _ = cmd_tx.send(CrafterCommand::Action(Action::DrinkPotionBlue));
+            true
+        }
+        KeyCode::Char('u') | KeyCode::Char('U') if crafter.input_capture => {
+            let _ = cmd_tx.send(CrafterCommand::Action(Action::DrinkPotionPink));
+            true
+        }
+        KeyCode::Char('i') | KeyCode::Char('I') if crafter.input_capture => {
+            let _ = cmd_tx.send(CrafterCommand::Action(Action::DrinkPotionCyan));
+            true
+        }
+        KeyCode::Char('o') | KeyCode::Char('O') if crafter.input_capture => {
+            let _ = cmd_tx.send(CrafterCommand::Action(Action::DrinkPotionYellow));
+            true
+        }
         KeyCode::Char('f') | KeyCode::Char('F') if crafter.input_capture => {
             let _ = cmd_tx.send(CrafterCommand::Action(Action::PlaceFurnace));
             true
@@ -1335,6 +1963,9 @@ pub fn drain_updates(crafter: &mut CrafterState, rx: &Receiver<CrafterUpdate>) {
             }
             CrafterUpdate::Paused { paused } => {
                 crafter.paused = paused;
+            }
+            CrafterUpdate::InputCapture { capture } => {
+                crafter.input_capture = capture;
             }
             CrafterUpdate::Frame {
                 lines,
@@ -1406,6 +2037,12 @@ pub fn draw_list(
     let green = [0.2, 0.8, 0.2, 1.0];
     let cyan = [0.2, 0.8, 0.9, 1.0];
 
+    let filtered_recordings = if crafter.show_recordings {
+        filtered_recording_indices(&crafter.recordings, &crafter.recordings_search)
+    } else {
+        Vec::new()
+    };
+
     let header = if crafter.show_recordings {
         "Recordings"
     } else {
@@ -1425,7 +2062,11 @@ pub fn draw_list(
     }
 
     let status = if crafter.show_recordings {
-        format!("{} recordings found", crafter.recordings.len())
+        format!(
+            "{} / {} recordings",
+            filtered_recordings.len(),
+            crafter.recordings.len()
+        )
     } else if crafter.replay_active {
         format!(
             "REPLAY: {}/{}  {}",
@@ -1488,16 +2129,34 @@ pub fn draw_list(
                 0 => format!(
                     "{}: {}",
                     label,
+                    crafter
+                        .profile_names
+                        .get(crafter.profile_index)
+                        .map(|name| name.as_str())
+                        .unwrap_or("default")
+                ),
+                1 => format!(
+                    "{}: {}",
+                    label,
+                    crafter
+                        .rule_configs
+                        .get(crafter.rule_config_index)
+                        .map(|config| config.name.as_str())
+                        .unwrap_or("classic")
+                ),
+                2 => format!(
+                    "{}: {}",
+                    label,
                     if crafter.config.logical_time {
                         "Logical (AI)"
                     } else {
                         "Real-time"
                     }
                 ),
-                1 => format!("{}: {} Hz", label, crafter.config.tick_rate),
-                2 => format!("{}: {}", label, crafter.config.world_width),
-                3 => format!("{}: {}", label, crafter.config.world_height),
-                4 => format!(
+                3 => format!("{}: {} Hz", label, crafter.config.tick_rate),
+                4 => format!("{}: {}", label, crafter.config.world_width),
+                5 => format!("{}: {}", label, crafter.config.world_height),
+                6 => format!(
                     "{}: {}",
                     label,
                     if crafter.config.random_seed {
@@ -1506,8 +2165,8 @@ pub fn draw_list(
                         "Fixed"
                     }
                 ),
-                5 => format!("{}: {}", label, crafter.config.seed),
-                6 => format!(
+                7 => format!("{}: {}", label, crafter.config.seed),
+                8 => format!(
                     "{}: {}",
                     label,
                     if crafter.config.graphics_mode {
@@ -1626,6 +2285,28 @@ pub fn draw_list(
     }
 
     if crafter.show_recordings {
+        let search_label = "Search (/):";
+        let search_value = if crafter.recordings_search_active {
+            format!("{}_", crafter.recordings_search)
+        } else {
+            crafter.recordings_search.clone()
+        };
+        let search_line = format!("{} {}", search_label, search_value);
+        unsafe {
+            ot::bufferDrawText(
+                buffer,
+                search_line.as_bytes().as_ptr(),
+                search_line.len(),
+                2,
+                y_start,
+                dim_fg.as_ptr(),
+                std::ptr::null(),
+                0,
+            );
+        }
+
+        let list_start = y_start.saturating_add(2);
+
         if crafter.recordings.is_empty() {
             let msg = "No recordings found. Play a game first!";
             unsafe {
@@ -1634,7 +2315,7 @@ pub fn draw_list(
                     msg.as_bytes().as_ptr(),
                     msg.len(),
                     2,
-                    y_start,
+                    list_start,
                     dim_fg.as_ptr(),
                     std::ptr::null(),
                     0,
@@ -1647,22 +2328,42 @@ pub fn draw_list(
                     hint.as_bytes().as_ptr(),
                     hint.len(),
                     2,
-                    y_start + 2,
+                    list_start + 2,
+                    dim_fg.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                );
+            }
+        } else if filtered_recordings.is_empty() {
+            let msg = "No recordings match the search.";
+            unsafe {
+                ot::bufferDrawText(
+                    buffer,
+                    msg.as_bytes().as_ptr(),
+                    msg.len(),
+                    2,
+                    list_start,
                     dim_fg.as_ptr(),
                     std::ptr::null(),
                     0,
                 );
             }
         } else {
-            let mut y = y_start;
-            for (i, rec) in crafter.recordings.iter().enumerate() {
+            let mut y = list_start;
+            for (i, &idx) in filtered_recordings.iter().enumerate() {
                 if y >= max_y {
                     break;
                 }
+                let rec = &crafter.recordings[idx];
                 let is_selected = i == crafter.selected_recording;
+                let total_possible = Achievements::all_names().len() as u32;
                 let line = format!(
-                    "{} {} steps, {:.1} reward",
-                    rec.name, rec.total_steps, rec.total_reward
+                    "{} {} steps, {:.1} reward  ach:{}/{}",
+                    rec.name,
+                    rec.total_steps,
+                    rec.total_reward,
+                    rec.unique_achievements,
+                    total_possible
                 );
                 let display_line = if line.len() > width.saturating_sub(4) as usize {
                     &line[..width.saturating_sub(4) as usize]
@@ -1859,13 +2560,35 @@ pub fn draw_detail(
                 inv.iron, inv.diamond, inv.sapling
             ),
             format!(
-                "Pickaxe: W{} S{} I{}",
-                inv.wood_pickaxe, inv.stone_pickaxe, inv.iron_pickaxe
+                "Sapphire: {}  Ruby: {}",
+                inv.sapphire, inv.ruby
             ),
             format!(
-                "Sword: W{} S{} I{}",
-                inv.wood_sword, inv.stone_sword, inv.iron_sword
+                "Pickaxe: W{} S{} I{} D{}",
+                inv.wood_pickaxe, inv.stone_pickaxe, inv.iron_pickaxe, inv.diamond_pickaxe
             ),
+            format!(
+                "Sword: W{} S{} I{} D{}",
+                inv.wood_sword, inv.stone_sword, inv.iron_sword, inv.diamond_sword
+            ),
+            format!("Bow: {}  Arrows: {}", inv.bow, inv.arrows),
+            format!(
+                "Armor: H{} C{} L{} B{}",
+                inv.armor_helmet,
+                inv.armor_chestplate,
+                inv.armor_leggings,
+                inv.armor_boots
+            ),
+            format!(
+                "Potions: R{} G{} B{} P{} C{} Y{}",
+                inv.potion_red,
+                inv.potion_green,
+                inv.potion_blue,
+                inv.potion_pink,
+                inv.potion_cyan,
+                inv.potion_yellow
+            ),
+            format!("XP: {}  Level: {}  SP: {}", inv.xp, inv.level, inv.stat_points),
         ];
 
         for line in inv_lines {
@@ -1908,7 +2631,7 @@ pub fn draw_detail(
 
         let legend_items = [
             "@ = Player",
-            "T = Tree (wood)",
+            "T = Tree / Troll",
             ". = Grass",
             "~ = Water/Stone",
             ": = Coal",
@@ -1917,6 +2640,16 @@ pub fn draw_detail(
             "Z = Zombie",
             "S = Skeleton",
             "C = Cow (food)",
+            "s = Sapphire",
+            "r = Ruby",
+            "H = Chest",
+            "O = Orc",
+            "M = Orc Mage",
+            "K = Knight",
+            "A = Archer",
+            "T = Troll",
+            "B = Bat",
+            "N = Snail",
         ];
 
         let legend_max_len = legend_items
@@ -1955,7 +2688,9 @@ pub fn draw_detail(
             "R = Place stone",
             "F = Place furnace",
             "P = Place plant",
-            "1-6 = Craft",
+            "T (menu) = Craft",
+            "G = Shoot arrow",
+            "Q/E/Y/U/I/O = Drink potions",
         ];
         if action_x < width.saturating_sub(4) {
             let mut action_y = legend_y_start;
@@ -2096,11 +2831,11 @@ pub fn action_hint(crafter: &CrafterState) -> String {
     } else if crafter.show_craft_menu || crafter.show_place_menu {
         "[Up/Down] Select  [Enter/Space] Confirm  [Esc] Cancel".to_string()
     } else if crafter.show_recordings {
-        "[Up/Down] Select  [Enter] Replay  [C] New game  [Esc] Back".to_string()
+        "[Up/Down] Select  [Enter] Replay  [/] Search  [C] New game  [Esc] Back".to_string()
     } else if crafter.replay_active {
         "[P] Pause  [B] Branch  [X/Esc] Stop replay  [C] New game".to_string()
     } else if crafter.input_capture {
-        "[WASD] Move  [Space] Interact  [Tab] Sleep  [T/R/F/P] Place  [1-6] Craft  [Esc] Release"
+        "[WASD] Move  [Space] Interact  [Tab] Sleep  [T/R/F/P] Place  [1-6] Craft  [G] Shoot  [Q/E/Y/U/I/O] Potions  [Esc] Release"
             .to_string()
     } else if crafter.running {
         "[C] Capture input  [P] Pause  [R] Reset  [L] Recordings".to_string()

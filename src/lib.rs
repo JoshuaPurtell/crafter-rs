@@ -19,6 +19,7 @@
 pub mod action;
 pub mod achievement;
 pub mod config;
+pub mod craftax;
 pub mod entity;
 pub mod image_renderer;
 pub mod inventory;

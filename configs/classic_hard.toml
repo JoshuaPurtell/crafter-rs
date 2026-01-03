@@ -1,0 +1,9 @@
+base = "classic"
+
+zombie_density = 2.0
+skeleton_density = 2.0
+zombie_damage_mult = 1.5
+arrow_damage_mult = 1.5
+hunger_rate = 15
+thirst_rate = 12
+diamond_density = 0.5

@@ -1,0 +1,29 @@
+# Craftax partial (hard): more hostiles, less loot
+
+[craftax]
+enabled = true
+mobs_enabled = true
+worldgen_enabled = true
+items_enabled = true
+combat_enabled = true
+chests_enabled = true
+potions_enabled = true
+xp_enabled = true
+achievements_enabled = true
+
+[craftax.spawn]
+orc_soldier_density = 1.4
+orc_mage_density = 1.4
+knight_density = 1.3
+knight_archer_density = 1.3
+troll_density = 1.3
+bat_density = 1.0
+snail_density = 0.8
+chest_density = 0.8
+sapphire_density = 0.9
+ruby_density = 0.9
+
+[craftax.loot]
+potion_drop_chance = 0.25
+arrow_drop_chance = 0.35
+gem_drop_chance = 0.15

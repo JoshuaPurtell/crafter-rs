@@ -1,5 +1,6 @@
 //! Rendering system for different output formats
 
+use crate::achievement::Achievements;
 use crate::entity::GameObject;
 use crate::session::GameState;
 use crate::world::WorldView;
@@ -62,6 +63,8 @@ impl TextRenderer {
             for x in 0..size {
                 let char = if let Some(&ch) = object_chars.get(&(x as i32, y as i32)) {
                     ch
+                } else if !view.is_in_bounds(x as i32, y as i32) {
+                    '?'
                 } else if let Some(mat) = view.get_material(x as i32, y as i32) {
                     mat.display_char()
                 } else {
@@ -128,29 +131,80 @@ impl Renderer for TextRenderer {
                 state.inventory.diamond,
                 state.inventory.sapling
             ));
+            output.push_str(&format!(
+                "Sapphire: {} | Ruby: {}\n",
+                state.inventory.sapphire,
+                state.inventory.ruby
+            ));
 
             output.push_str("\n=== TOOLS ===\n");
             output.push_str(&format!(
-                "Pickaxes: Wood={} Stone={} Iron={}\n",
+                "Pickaxes: Wood={} Stone={} Iron={} Diamond={}\n",
                 state.inventory.wood_pickaxe,
                 state.inventory.stone_pickaxe,
-                state.inventory.iron_pickaxe
+                state.inventory.iron_pickaxe,
+                state.inventory.diamond_pickaxe
             ));
             output.push_str(&format!(
-                "Swords: Wood={} Stone={} Iron={}\n",
+                "Swords: Wood={} Stone={} Iron={} Diamond={}\n",
                 state.inventory.wood_sword,
                 state.inventory.stone_sword,
-                state.inventory.iron_sword
+                state.inventory.iron_sword,
+                state.inventory.diamond_sword
+            ));
+            output.push_str(&format!(
+                "Bow: {} | Arrows: {}\n",
+                state.inventory.bow,
+                state.inventory.arrows
+            ));
+            output.push_str(&format!(
+                "Armor: H{} C{} L{} B{}\n",
+                state.inventory.armor_helmet,
+                state.inventory.armor_chestplate,
+                state.inventory.armor_leggings,
+                state.inventory.armor_boots
+            ));
+            output.push_str(&format!(
+                "Potions: R{} G{} B{} P{} C{} Y{}\n",
+                state.inventory.potion_red,
+                state.inventory.potion_green,
+                state.inventory.potion_blue,
+                state.inventory.potion_pink,
+                state.inventory.potion_cyan,
+                state.inventory.potion_yellow
+            ));
+            output.push_str(&format!(
+                "XP: {} | Level: {} | Stat Points: {}\n",
+                state.inventory.xp,
+                state.inventory.level,
+                state.inventory.stat_points
             ));
             output.push('\n');
         }
 
         // Achievements
         if self.show_achievements {
+            let craftax_active = state.inventory.sapphire > 0
+                || state.inventory.ruby > 0
+                || state.inventory.diamond_pickaxe > 0
+                || state.inventory.diamond_sword > 0
+                || state.inventory.bow > 0
+                || state.inventory.arrows > 0
+                || state.inventory.potion_red > 0
+                || state.inventory.potion_green > 0
+                || state.inventory.potion_blue > 0
+                || state.inventory.potion_pink > 0
+                || state.inventory.potion_cyan > 0
+                || state.inventory.potion_yellow > 0;
             let unlocked = state.achievements.total_unlocked();
+            let total = if craftax_active {
+                Achievements::all_names_with_craftax().len()
+            } else {
+                Achievements::all_names().len()
+            };
             output.push_str(&format!(
-                "=== ACHIEVEMENTS ({}/22) ===\n",
-                unlocked
+                "=== ACHIEVEMENTS ({}/{}) ===\n",
+                unlocked, total
             ));
 
             let ach = &state.achievements;
@@ -220,6 +274,75 @@ impl Renderer for TextRenderer {
             if ach.wake_up > 0 {
                 output.push_str(&format!("  wake_up: {}\n", ach.wake_up));
             }
+            if ach.collect_sapphire > 0 {
+                output.push_str(&format!("  collect_sapphire: {}\n", ach.collect_sapphire));
+            }
+            if ach.collect_ruby > 0 {
+                output.push_str(&format!("  collect_ruby: {}\n", ach.collect_ruby));
+            }
+            if ach.open_chest > 0 {
+                output.push_str(&format!("  open_chest: {}\n", ach.open_chest));
+            }
+            if ach.make_diamond_pickaxe > 0 {
+                output.push_str(&format!(
+                    "  make_diamond_pickaxe: {}\n",
+                    ach.make_diamond_pickaxe
+                ));
+            }
+            if ach.make_diamond_sword > 0 {
+                output.push_str(&format!(
+                    "  make_diamond_sword: {}\n",
+                    ach.make_diamond_sword
+                ));
+            }
+            if ach.make_bow > 0 {
+                output.push_str(&format!("  make_bow: {}\n", ach.make_bow));
+            }
+            if ach.make_arrow > 0 {
+                output.push_str(&format!("  make_arrow: {}\n", ach.make_arrow));
+            }
+            if ach.make_iron_armor > 0 {
+                output.push_str(&format!("  make_iron_armor: {}\n", ach.make_iron_armor));
+            }
+            if ach.make_diamond_armor > 0 {
+                output.push_str(&format!(
+                    "  make_diamond_armor: {}\n",
+                    ach.make_diamond_armor
+                ));
+            }
+            if ach.defeat_orc_soldier > 0 {
+                output.push_str(&format!(
+                    "  defeat_orc_soldier: {}\n",
+                    ach.defeat_orc_soldier
+                ));
+            }
+            if ach.defeat_orc_mage > 0 {
+                output.push_str(&format!(
+                    "  defeat_orc_mage: {}\n",
+                    ach.defeat_orc_mage
+                ));
+            }
+            if ach.defeat_knight > 0 {
+                output.push_str(&format!("  defeat_knight: {}\n", ach.defeat_knight));
+            }
+            if ach.defeat_knight_archer > 0 {
+                output.push_str(&format!(
+                    "  defeat_knight_archer: {}\n",
+                    ach.defeat_knight_archer
+                ));
+            }
+            if ach.defeat_troll > 0 {
+                output.push_str(&format!("  defeat_troll: {}\n", ach.defeat_troll));
+            }
+            if ach.drink_potion > 0 {
+                output.push_str(&format!("  drink_potion: {}\n", ach.drink_potion));
+            }
+            if ach.gain_xp > 0 {
+                output.push_str(&format!("  gain_xp: {}\n", ach.gain_xp));
+            }
+            if ach.reach_level > 0 {
+                output.push_str(&format!("  reach_level: {}\n", ach.reach_level));
+            }
             output.push('\n');
         }
 
@@ -229,7 +352,15 @@ impl Renderer for TextRenderer {
             output.push_str("Terrain: ");
             output.push_str(". grass  ~ water  # stone  _ path  : sand  T tree  % lava\n");
             output.push_str("         c coal   i iron   d diamond  t table  f furnace\n");
-            output.push_str("Entities: @ player  C cow  Z zombie  S skeleton  * arrow  P/p plant\n");
+            output.push_str(
+                "         s sapphire  r ruby  H chest\n",
+            );
+            output.push_str(
+                "Entities: @ player  C cow  Z zombie  S skeleton  * arrow  P/p plant\n",
+            );
+            output.push_str(
+                "          O orc  M orc mage  K knight  A archer  T troll  B bat  N snail\n",
+            );
         }
 
         Ok(output)
@@ -300,6 +431,15 @@ impl SemanticRenderer {
                         25
                     }
                 }
+                GameObject::CraftaxMob(mob) => match mob.kind {
+                    crate::entity::CraftaxMobKind::OrcSoldier => 27,
+                    crate::entity::CraftaxMobKind::OrcMage => 28,
+                    crate::entity::CraftaxMobKind::Knight => 29,
+                    crate::entity::CraftaxMobKind::KnightArcher => 30,
+                    crate::entity::CraftaxMobKind::Troll => 31,
+                    crate::entity::CraftaxMobKind::Bat => 32,
+                    crate::entity::CraftaxMobKind::Snail => 33,
+                },
             };
             object_types.insert((*x, *y), type_id);
         }

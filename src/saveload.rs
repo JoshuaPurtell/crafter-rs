@@ -9,7 +9,6 @@ use crate::session::{Session, SessionTiming};
 use crate::world::World;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
