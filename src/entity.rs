@@ -612,7 +612,7 @@ impl CraftaxMob {
             CraftaxMobKind::OrcMage => 'M',
             CraftaxMobKind::Knight => 'K',
             CraftaxMobKind::KnightArcher => 'A',
-            CraftaxMobKind::Troll => 'T',
+            CraftaxMobKind::Troll => 't',
             CraftaxMobKind::Bat => 'B',
             CraftaxMobKind::Snail => 'N',
         }

@@ -140,7 +140,7 @@ impl Material {
             Material::Coal => 'c',
             Material::Iron => 'i',
             Material::Diamond => 'd',
-            Material::Table => 't',
+            Material::Table => '+',
             Material::Furnace => 'f',
             Material::Sapphire => 's',
             Material::Ruby => 'r',

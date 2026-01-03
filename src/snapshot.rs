@@ -550,7 +550,7 @@ impl SnapshotManager {
                 SnapshotLine { label: "M".to_string(), value: "Orc Mage".to_string() },
                 SnapshotLine { label: "K".to_string(), value: "Knight".to_string() },
                 SnapshotLine { label: "A".to_string(), value: "Knight Archer".to_string() },
-                SnapshotLine { label: "T".to_string(), value: "Troll".to_string() },
+                SnapshotLine { label: "t".to_string(), value: "Troll".to_string() },
                 SnapshotLine { label: "B".to_string(), value: "Bat".to_string() },
                 SnapshotLine { label: "N".to_string(), value: "Snail".to_string() },
             ]);

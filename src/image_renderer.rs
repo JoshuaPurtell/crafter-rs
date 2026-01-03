@@ -482,6 +482,16 @@ impl ImageRenderer {
         rgb_bytes
     }
 
+    /// Render a single entity sprite to raw RGBA bytes.
+    pub fn render_entity_icon(&self, obj: &GameObject) -> Option<(Vec<u8>, u32, u32)> {
+        let sprite_name = self.entity_sprite(obj);
+        let sprite = self.sprites.get(sprite_name)?;
+        let size = self.config.tile_size;
+        let mut img: RgbaImage = ImageBuffer::new(size, size);
+        self.draw_sprite_alpha(&mut img, sprite, 0, 0);
+        Some((img.into_raw(), size, size))
+    }
+
     /// Draw a status icon at the given position
     fn draw_status_icon(&self, img: &mut RgbaImage, name: &str, x: u32, y: u32, size: u32) {
         if let Some(sprite) = self.sprites.get(name) {
@@ -715,6 +725,10 @@ impl ImageRenderer {
 
     pub fn render_bytes(&self, _state: &GameState) -> Vec<u8> {
         Vec::new()
+    }
+
+    pub fn render_entity_icon(&self, _obj: &GameObject) -> Option<(Vec<u8>, u32, u32)> {
+        None
     }
 }
 

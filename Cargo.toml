@@ -1,6 +1,6 @@
 [package]
 name = "crafter-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Core game logic for Crafter - a Minecraft-like 2D survival game engine"
 license = "MIT"
@@ -20,6 +20,7 @@ noise = "0.9"
 uuid = { version = "1.0", features = ["v4"] }
 image = { version = "0.24", optional = true }
 toml = "0.8"
+serde_yaml = "0.9"
 
 [features]
 default = []

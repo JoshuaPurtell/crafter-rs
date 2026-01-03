@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent};
 use crafter_core::image_renderer::{ImageRenderer, ImageRendererConfig};
 use crafter_core::recording::{Recording, RecordingOptions, RecordingSession, ReplaySession};
-use crafter_core::{Achievements, SaveData};
+use crafter_core::{Achievements, GameObject, SaveData};
 use crafter_core::renderer::{Renderer, TextRenderer};
 use crafter_core::{Action, SessionConfig};
 use opentui_sys as ot;
@@ -62,6 +62,7 @@ pub enum CrafterUpdate {
         energy: i32,
         tick: u64,
         achievements: Vec<String>,
+        visible_mobs: Vec<MobPreview>,
         // Inventory
         inventory: InventoryData,
     },
@@ -115,6 +116,14 @@ pub struct InventoryData {
     pub xp: u32,
     pub level: u8,
     pub stat_points: u8,
+}
+
+#[derive(Clone, Debug)]
+pub struct MobPreview {
+    pub label: String,
+    pub rgba: Option<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl InventoryData {
@@ -187,6 +196,7 @@ pub struct CrafterState {
     pub actual_hz: f32,
     pub events: Vec<String>,
     pub achievements: Vec<String>,
+    pub visible_mobs: Vec<MobPreview>,
     pub last_action: Option<Action>,
     pub inventory: InventoryData,
     // Recording/replay state
@@ -311,6 +321,7 @@ impl CrafterState {
             actual_hz: 0.0,
             events: Vec::new(),
             achievements: Vec::new(),
+            visible_mobs: Vec::new(),
             last_action: None,
             inventory: InventoryData::default(),
             recordings: Vec::new(),
@@ -391,6 +402,7 @@ pub struct RuleConfigEntry {
     name: String,
     path: Option<PathBuf>,
     editable: bool,
+    extension: String,
 }
 
 fn list_profiles() -> Vec<String> {
@@ -417,12 +429,13 @@ fn list_rule_configs() -> Vec<RuleConfigEntry> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map(|e| e == "toml").unwrap_or(false) {
+                if let Some(ext) = rule_config_extension(&path) {
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                         configs.entry(stem.to_string()).or_insert(RuleConfigEntry {
                             name: stem.to_string(),
                             path: Some(path),
                             editable: false,
+                            extension: ext.to_string(),
                         });
                     }
                 }
@@ -434,7 +447,7 @@ fn list_rule_configs() -> Vec<RuleConfigEntry> {
     if let Ok(entries) = std::fs::read_dir(&user_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map(|e| e == "toml").unwrap_or(false) {
+            if let Some(ext) = rule_config_extension(&path) {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     configs.insert(
                         stem.to_string(),
@@ -442,6 +455,7 @@ fn list_rule_configs() -> Vec<RuleConfigEntry> {
                             name: stem.to_string(),
                             path: Some(path),
                             editable: true,
+                            extension: ext.to_string(),
                         },
                     );
                 }
@@ -456,6 +470,7 @@ fn list_rule_configs() -> Vec<RuleConfigEntry> {
                 name: default_rule_config_name(),
                 path: None,
                 editable: false,
+                extension: "toml".to_string(),
             },
         );
     }
@@ -492,6 +507,31 @@ fn selected_rule_config_name(state: &CrafterState) -> String {
         .unwrap_or_else(default_rule_config_name)
 }
 
+fn selected_rule_config_display_name(state: &CrafterState) -> String {
+    state
+        .rule_configs
+        .get(state.rule_config_index)
+        .map(rule_config_display_name)
+        .unwrap_or_else(|| format!("{}.toml", default_rule_config_name()))
+}
+
+fn rule_config_extension(path: &Path) -> Option<&'static str> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("toml") => Some("toml"),
+        Some("yaml") => Some("yaml"),
+        Some("yml") => Some("yml"),
+        _ => None,
+    }
+}
+
+fn rule_config_display_name(entry: &RuleConfigEntry) -> String {
+    if entry.extension.is_empty() {
+        entry.name.clone()
+    } else {
+        format!("{}.{}", entry.name, entry.extension)
+    }
+}
+
 fn refresh_rule_configs(state: &mut CrafterState) {
     state.rule_configs = list_rule_configs();
     state.rule_config_index = rule_config_index(&state.rule_configs, &state.config.rule_config);
@@ -504,6 +544,18 @@ fn refresh_rule_configs(state: &mut CrafterState) {
 }
 
 fn create_rule_config_from_selected(state: &mut CrafterState) -> Option<String> {
+    let ext = state
+        .rule_configs
+        .get(state.rule_config_index)
+        .map(|entry| entry.extension.clone())
+        .unwrap_or_else(|| "toml".to_string());
+    create_rule_config_from_selected_with_ext(state, &ext)
+}
+
+fn create_rule_config_from_selected_with_ext(
+    state: &mut CrafterState,
+    ext: &str,
+) -> Option<String> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -511,7 +563,7 @@ fn create_rule_config_from_selected(state: &mut CrafterState) -> Option<String> 
     let name = format!("custom_{}", timestamp);
     let mut target = rule_configs_dir();
     let _ = std::fs::create_dir_all(&target);
-    target.push(format!("{}.toml", name));
+    target.push(format!("{}.{}", name, ext));
 
     let source = state
         .rule_configs
@@ -521,7 +573,11 @@ fn create_rule_config_from_selected(state: &mut CrafterState) -> Option<String> 
     if let Some(source_path) = source {
         let _ = std::fs::copy(source_path, &target);
     } else {
-        let contents = format!("base = \"{}\"\n", default_rule_config_name());
+        let contents = if ext == "yaml" || ext == "yml" {
+            format!("base: \"{}\"\n", default_rule_config_name())
+        } else {
+            format!("base = \"{}\"\n", default_rule_config_name())
+        };
         let _ = std::fs::write(&target, contents);
     }
 
@@ -607,9 +663,11 @@ fn load_session_config(game_config: &CrafterConfig) -> Option<SessionConfig> {
         return SessionConfig::load_from_path(direct_path).ok();
     }
 
-    let user_path = rule_configs_dir().join(format!("{}.toml", name));
-    if user_path.exists() {
-        return SessionConfig::load_from_path(user_path).ok();
+    for ext in ["toml", "yaml", "yml"] {
+        let user_path = rule_configs_dir().join(format!("{}.{}", name, ext));
+        if user_path.exists() {
+            return SessionConfig::load_from_path(user_path).ok();
+        }
     }
 
     SessionConfig::load_named(name).ok()
@@ -788,6 +846,7 @@ fn make_frame_update(
     reward: f32,
     newly_unlocked: Vec<String>,
 ) -> CrafterUpdate {
+    let visible_mobs = visible_mob_previews(state);
     if graphics_mode {
         let (rgba_data, pixel_w, pixel_h, _cells_w, _cells_h) =
             render_state_graphics(state, tile_size);
@@ -803,6 +862,7 @@ fn make_frame_update(
             energy: state.inventory.energy as i32,
             tick: state.step,
             achievements: newly_unlocked,
+            visible_mobs,
             inventory: InventoryData::from_crafter(&state.inventory),
         }
     } else {
@@ -819,6 +879,7 @@ fn make_frame_update(
             energy: state.inventory.energy as i32,
             tick: state.step,
             achievements: newly_unlocked,
+            visible_mobs,
             inventory: InventoryData::from_crafter(&state.inventory),
         }
     }
@@ -1418,6 +1479,81 @@ fn render_state(state: &crafter_core::GameState) -> Vec<String> {
     }
 }
 
+fn visible_mob_previews(state: &crafter_core::GameState) -> Vec<MobPreview> {
+    let view = match &state.view {
+        Some(view) => view,
+        None => return Vec::new(),
+    };
+
+    let icon_tile_size = 8u32;
+    let renderer = ImageRenderer::new(ImageRendererConfig {
+        tile_size: icon_tile_size,
+        show_status_bars: false,
+        apply_lighting: false,
+    });
+
+    let mut previews = std::collections::HashMap::<char, MobPreview>::new();
+    for (_, _, obj) in &view.objects {
+        if let Some((ch, name)) = mob_char_name(obj) {
+            if previews.contains_key(&ch) {
+                continue;
+            }
+            let (rgba, width, height) = match renderer.render_entity_icon(obj) {
+                Some((rgba, width, height)) => (Some(rgba), width, height),
+                None => (None, 0, 0),
+            };
+            previews.insert(
+                ch,
+                MobPreview {
+                    label: format!("{} = {}", ch, name),
+                    rgba,
+                    width,
+                    height,
+                },
+            );
+        }
+    }
+
+    let order = [
+        ('Z', "Zombie"),
+        ('S', "Skeleton"),
+        ('C', "Cow (food)"),
+        ('O', "Orc"),
+        ('M', "Orc Mage"),
+        ('K', "Knight"),
+        ('A', "Archer"),
+        ('t', "Troll"),
+        ('B', "Bat"),
+        ('N', "Snail"),
+    ];
+
+    let mut lines = Vec::new();
+    for (ch, _) in order {
+        if let Some(preview) = previews.remove(&ch) {
+            lines.push(preview);
+        }
+    }
+    lines
+}
+
+fn mob_char_name(obj: &GameObject) -> Option<(char, &'static str)> {
+    match obj {
+        GameObject::Zombie(_) => Some(('Z', "Zombie")),
+        GameObject::Skeleton(_) => Some(('S', "Skeleton")),
+        GameObject::Cow(_) => Some(('C', "Cow (food)")),
+        GameObject::CraftaxMob(mob) => match mob.kind {
+            crafter_core::entity::CraftaxMobKind::OrcSoldier => Some(('O', "Orc")),
+            crafter_core::entity::CraftaxMobKind::OrcMage => Some(('M', "Orc Mage")),
+            crafter_core::entity::CraftaxMobKind::Knight => Some(('K', "Knight")),
+            crafter_core::entity::CraftaxMobKind::KnightArcher => Some(('A', "Archer")),
+            crafter_core::entity::CraftaxMobKind::Troll => Some(('t', "Troll")),
+            crafter_core::entity::CraftaxMobKind::Bat => Some(('B', "Bat")),
+            crafter_core::entity::CraftaxMobKind::Snail => Some(('N', "Snail")),
+        },
+        _ => None,
+    }
+}
+
 fn render_state_graphics(
     state: &crafter_core::GameState,
     _tile_size: u32,
@@ -1719,6 +1855,21 @@ pub fn handle_key(
                     false
                 }
             }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if crafter.config_selection == 1 {
+                    if let Some(name) =
+                        create_rule_config_from_selected_with_ext(crafter, "yaml")
+                    {
+                        refresh_rule_configs(crafter);
+                        crafter.rule_config_index = rule_config_index(&crafter.rule_configs, &name);
+                        crafter.config.rule_config = name;
+                        crafter.status = "Created rule config (yaml)".to_string();
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 if crafter.config_selection == 1 {
                     if delete_selected_rule_config(crafter) {
@@ -1979,6 +2130,7 @@ pub fn drain_updates(crafter: &mut CrafterState, rx: &Receiver<CrafterUpdate>) {
                 energy,
                 tick,
                 achievements,
+                visible_mobs,
                 inventory,
             } => {
                 crafter.frame_lines = lines;
@@ -1994,6 +2146,7 @@ pub fn drain_updates(crafter: &mut CrafterState, rx: &Receiver<CrafterUpdate>) {
                 crafter.thirst = thirst;
                 crafter.energy = energy;
                 crafter.tick = tick;
+                crafter.visible_mobs = visible_mobs;
                 for ach in achievements {
                     if !crafter.achievements.contains(&ach) {
                         crafter.achievements.push(ach);
@@ -2076,7 +2229,7 @@ pub fn draw_list(
         )
     } else {
         format!(
-            "HP: {}  Food: {}  Thirst: {}  {}",
+            "HP: {}  Food: {}  Drink: {}  {}",
             crafter.health,
             crafter.food,
             crafter.thirst,
@@ -2138,11 +2291,7 @@ pub fn draw_list(
                 1 => format!(
                     "{}: {}",
                     label,
-                    crafter
-                        .rule_configs
-                        .get(crafter.rule_config_index)
-                        .map(|config| config.name.as_str())
-                        .unwrap_or("classic")
+                    selected_rule_config_display_name(crafter)
                 ),
                 2 => format!(
                     "{}: {}",
@@ -2510,7 +2659,7 @@ pub fn draw_detail(
     let info_lines = [
         format!("Status: {}", crafter.status),
         format!(
-            "Health: {}  Food: {}  Thirst: {}  Energy: {}",
+            "Health: {}  Food: {}  Drink: {}  Energy: {}",
             crafter.health, crafter.food, crafter.thirst, crafter.energy
         ),
         format!("Tick: {}", crafter.tick),
@@ -2533,6 +2682,100 @@ pub fn draw_detail(
             );
         }
         y = y.saturating_add(1);
+    }
+
+    let visible = &crafter.visible_mobs;
+    if !visible.is_empty() {
+        y = y.saturating_add(1);
+        if y < max_y {
+            let header = "Visible Mobs";
+            unsafe {
+                ot::bufferDrawText(
+                    buffer,
+                    header.as_bytes().as_ptr(),
+                    header.len(),
+                    x,
+                    y,
+                    fg.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                );
+            }
+            y = y.saturating_add(1);
+            let max_rows = 6usize.min(max_y.saturating_sub(y) as usize);
+            for (idx, preview) in visible.iter().take(max_rows).enumerate() {
+                if y >= max_y {
+                    break;
+                }
+                let mut label_x = x;
+                let mut row_height = 1u32;
+                if let Some(ref rgba) = preview.rgba {
+                    if preview.width > 0 && preview.height > 0 {
+                        let cells_w = preview.width / 2;
+                        let cells_h = preview.height / 2;
+                        let bytes_per_row = preview.width * 4;
+                        row_height = cells_h.max(1);
+                        unsafe {
+                            let icon_buffer = ot::createOptimizedBuffer(cells_w, cells_h, false);
+                            if !icon_buffer.is_null() {
+                                ot::bufferDrawSuperSampleBuffer(
+                                    icon_buffer,
+                                    0,
+                                    0,
+                                    rgba.as_ptr(),
+                                    rgba.len(),
+                                    1,
+                                    bytes_per_row,
+                                );
+                                ot::drawFrameBuffer(
+                                    buffer,
+                                    x as i32,
+                                    y as i32,
+                                    icon_buffer,
+                                    0,
+                                    0,
+                                    cells_w,
+                                    cells_h,
+                                );
+                                ot::destroyOptimizedBuffer(icon_buffer);
+                            }
+                        }
+                        label_x = x.saturating_add(cells_w.saturating_add(1));
+                    }
+                }
+                let label_y = y.saturating_add(row_height / 2);
+                unsafe {
+                    ot::bufferDrawText(
+                        buffer,
+                        preview.label.as_bytes().as_ptr(),
+                        preview.label.len(),
+                        label_x,
+                        label_y,
+                        dim_fg.as_ptr(),
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+                y = y.saturating_add(row_height);
+                if idx + 1 == max_rows && visible.len() > max_rows && y < max_y {
+                    let remaining = visible.len() - max_rows;
+                    let more_line = format!("... +{} more", remaining);
+                    unsafe {
+                        ot::bufferDrawText(
+                            buffer,
+                            more_line.as_bytes().as_ptr(),
+                            more_line.len(),
+                            x,
+                            y,
+                            dim_fg.as_ptr(),
+                            std::ptr::null(),
+                            0,
+                        );
+                    }
+                    y = y.saturating_add(1);
+                }
+            }
+        }
     }
 
     y = y.saturating_add(1);
@@ -2612,7 +2855,12 @@ pub fn draw_detail(
     }
 
     y = y.saturating_add(1);
-    if y < max_y {
+    let legend_limit_y = if crafter.achievements.is_empty() {
+        max_y
+    } else {
+        max_y.saturating_sub(8)
+    };
+    if y < legend_limit_y {
         let legend_y_start = y;
         let legend_header = "Map Legend";
         unsafe {
@@ -2631,7 +2879,7 @@ pub fn draw_detail(
 
         let legend_items = [
             "@ = Player",
-            "T = Tree / Troll",
+            "T = Tree",
             ". = Grass",
             "~ = Water/Stone",
             ": = Coal",
@@ -2647,7 +2895,7 @@ pub fn draw_detail(
             "M = Orc Mage",
             "K = Knight",
             "A = Archer",
-            "T = Troll",
+            "t = Troll",
             "B = Bat",
             "N = Snail",
         ];
@@ -2659,26 +2907,42 @@ pub fn draw_detail(
             .unwrap_or(0)
             .max(legend_header.len()) as u32;
 
-        for legend in legend_items {
-            if y >= max_y {
+        let legend_col_width = legend_max_len.saturating_add(2).max(12);
+        let legend_available_width = width.saturating_sub(x + 2);
+        let legend_columns = (legend_available_width / legend_col_width).max(1).min(2) as usize;
+        let legend_rows = (legend_items.len() + legend_columns - 1) / legend_columns;
+        let legend_rows = legend_rows.min((legend_limit_y.saturating_sub(y)) as usize);
+
+        for row in 0..legend_rows {
+            let row_y = y + row as u32;
+            if row_y >= legend_limit_y {
                 break;
             }
-            unsafe {
-                ot::bufferDrawText(
-                    buffer,
-                    legend.as_bytes().as_ptr(),
-                    legend.len(),
-                    x,
-                    y,
-                    dim_fg.as_ptr(),
-                    std::ptr::null(),
-                    0,
-                );
+            for col in 0..legend_columns {
+                let idx = col * legend_rows + row;
+                if idx >= legend_items.len() {
+                    break;
+                }
+                let legend = legend_items[idx];
+                let col_x = x + (col as u32 * legend_col_width);
+                unsafe {
+                    ot::bufferDrawText(
+                        buffer,
+                        legend.as_bytes().as_ptr(),
+                        legend.len(),
+                        col_x,
+                        row_y,
+                        dim_fg.as_ptr(),
+                        std::ptr::null(),
+                        0,
+                    );
+                }
             }
-            y = y.saturating_add(1);
         }
 
-        let action_x = x.saturating_add(legend_max_len + 4);
+        y = legend_y_start.saturating_add(legend_rows as u32);
+
+        let action_x = x.saturating_add(legend_col_width * legend_columns as u32 + 4);
         let action_header = "Action Legend";
         let action_items = [
             "WASD = Move",
@@ -2708,7 +2972,7 @@ pub fn draw_detail(
             }
             action_y = action_y.saturating_add(1);
             for action in action_items {
-                if action_y >= max_y {
+                if action_y >= legend_limit_y {
                     break;
                 }
                 unsafe {
@@ -2754,9 +3018,10 @@ pub fn draw_detail(
             .max(header.len()) as u32;
         let col_width = max_len.saturating_add(2).max(12);
         let available_width = width.saturating_sub(x + 2);
-        let columns = (available_width / col_width).max(1) as usize;
+        let columns = (available_width / col_width).max(1).min(2) as usize;
+        let max_rows = 6usize.min(max_y.saturating_sub(y) as usize);
         let rows = (crafter.achievements.len() + columns - 1) / columns;
-        let rows = rows.min((max_y.saturating_sub(y)) as usize);
+        let rows = rows.min(max_rows);
 
         for row in 0..rows {
             let row_y = y + row as u32;
@@ -2785,6 +3050,24 @@ pub fn draw_detail(
             }
         }
         y = y.saturating_add(rows as u32);
+        let shown = rows * columns;
+        if crafter.achievements.len() > shown && y < max_y {
+            let remaining = crafter.achievements.len() - shown;
+            let more_line = format!("... +{} more", remaining);
+            unsafe {
+                ot::bufferDrawText(
+                    buffer,
+                    more_line.as_bytes().as_ptr(),
+                    more_line.len(),
+                    x,
+                    y,
+                    dim_fg.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                );
+            }
+            y = y.saturating_add(1);
+        }
     }
 
     y = y.saturating_add(1);
@@ -2804,7 +3087,7 @@ pub fn draw_detail(
         }
         y = y.saturating_add(1);
 
-        for event in crafter.events.iter().rev().take(5) {
+        for event in crafter.events.iter().rev().take(3) {
             if y >= max_y {
                 break;
             }
@@ -2827,7 +3110,8 @@ pub fn draw_detail(
 
 pub fn action_hint(crafter: &CrafterState) -> String {
     if crafter.show_config_menu {
-        "[Up/Down] Select  [Left/Right] Adjust  [Enter] Start  [Esc] Back".to_string()
+        "[Up/Down] Select  [Left/Right] Adjust  [N] New  [Y] New YAML  [E] Edit  [D] Delete  [Enter] Start  [Esc] Back"
+            .to_string()
     } else if crafter.show_craft_menu || crafter.show_place_menu {
         "[Up/Down] Select  [Enter/Space] Confirm  [Esc] Cancel".to_string()
     } else if crafter.show_recordings {

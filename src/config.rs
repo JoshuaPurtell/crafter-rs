@@ -204,6 +204,7 @@ impl Default for CraftaxLootConfig {
 pub enum ConfigError {
     Io(std::io::Error),
     Toml(toml::de::Error),
+    Yaml(serde_yaml::Error),
     NotFound(String),
 }
 
@@ -212,6 +213,7 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::Io(err) => write!(f, "config io error: {}", err),
             ConfigError::Toml(err) => write!(f, "config toml error: {}", err),
+            ConfigError::Yaml(err) => write!(f, "config yaml error: {}", err),
             ConfigError::NotFound(name) => write!(f, "config not found: {}", name),
         }
     }
@@ -228,6 +230,12 @@ impl From<std::io::Error> for ConfigError {
 impl From<toml::de::Error> for ConfigError {
     fn from(err: toml::de::Error) -> Self {
         ConfigError::Toml(err)
+    }
+}
+
+impl From<serde_yaml::Error> for ConfigError {
+    fn from(err: serde_yaml::Error) -> Self {
+        ConfigError::Yaml(err)
     }
 }
 
@@ -608,9 +616,24 @@ impl SessionConfig {
         Ok(parsed.overrides.apply_to(base))
     }
 
+    pub fn from_yaml_str(contents: &str) -> Result<Self, ConfigError> {
+        let parsed: SessionConfigFile = serde_yaml::from_str(contents)?;
+        let base = if let Some(name) = parsed.base {
+            SessionConfig::load_named(&name)?
+        } else {
+            SessionConfig::default()
+        };
+        Ok(parsed.overrides.apply_to(base))
+    }
+
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
         let contents = fs::read_to_string(path)?;
-        SessionConfig::from_toml_str(&contents)
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some("yaml") | Some("yml") => SessionConfig::from_yaml_str(&contents),
+            Some("toml") => SessionConfig::from_toml_str(&contents),
+            _ => SessionConfig::from_toml_str(&contents).or_else(|_| SessionConfig::from_yaml_str(&contents)),
+        }
     }
 
     pub fn load_named(name: &str) -> Result<Self, ConfigError> {
@@ -626,27 +649,30 @@ fn resolve_named_config_path(name: &str) -> Option<PathBuf> {
         return Some(raw);
     }
 
-    let file_name = if name.ends_with(".toml") {
-        name.to_string()
-    } else {
-        format!("{}.toml", name)
-    };
+    let extensions = ["toml", "yaml", "yml"];
+    for ext in extensions {
+        let file_name = if name.ends_with(&format!(".{}", ext)) {
+            name.to_string()
+        } else {
+            format!("{}.{}", name, ext)
+        };
 
-    if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join(&file_name);
-        if candidate.exists() {
-            return Some(candidate);
+        if let Ok(cwd) = std::env::current_dir() {
+            let candidate = cwd.join(&file_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            let candidate = cwd.join("configs").join(&file_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
-        let candidate = cwd.join("configs").join(&file_name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
 
-    if let Some(dir) = std::env::var_os("CRAFTER_CONFIG_DIR").map(PathBuf::from) {
-        let candidate = dir.join(&file_name);
-        if candidate.exists() {
-            return Some(candidate);
+        if let Some(dir) = std::env::var_os("CRAFTER_CONFIG_DIR").map(PathBuf::from) {
+            let candidate = dir.join(&file_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
     }
 
