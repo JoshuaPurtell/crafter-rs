@@ -277,6 +277,13 @@ fn run_headless_probe(config_name: &str) {
         SessionConfig::default()
     };
 
+    let mut config = config;
+    if let Some(seed) = std::env::var("CRAFTER_SEED")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        config.seed = Some(seed);
+    }
     let mut session = Session::new(config);
     let mut counts = std::collections::HashMap::<&'static str, u32>::new();
 
@@ -285,6 +292,10 @@ fn run_headless_probe(config_name: &str) {
             let pos = (x as i32, y as i32);
             if let Some(mat) = session.world.get_material(pos) {
                 let key = match mat {
+                    Material::Tree => "tree",
+                    Material::Coal => "coal",
+                    Material::Iron => "iron",
+                    Material::Diamond => "diamond",
                     Material::Sapphire => "sapphire",
                     Material::Ruby => "ruby",
                     Material::Chest => "chest",
@@ -314,7 +325,11 @@ fn run_headless_probe(config_name: &str) {
     println!("=== Headless Craftax Probe ===");
     println!("Config: {}", config_name);
     println!(
-        "Materials: sapphire={} ruby={} chest={}",
+        "Materials: tree={} coal={} iron={} diamond={} sapphire={} ruby={} chest={}",
+        counts.get("tree").unwrap_or(&0),
+        counts.get("coal").unwrap_or(&0),
+        counts.get("iron").unwrap_or(&0),
+        counts.get("diamond").unwrap_or(&0),
         counts.get("sapphire").unwrap_or(&0),
         counts.get("ruby").unwrap_or(&0),
         counts.get("chest").unwrap_or(&0)

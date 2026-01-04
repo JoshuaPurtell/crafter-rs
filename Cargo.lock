@@ -141,6 +141,7 @@ dependencies = [
  "crossterm",
  "opentui-sys",
  "serde",
+ "serde_yaml",
  "toml 0.8.23",
 ]
 

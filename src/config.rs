@@ -80,6 +80,9 @@ pub struct SessionConfig {
     /// Enable fatigue/energy mechanic (default: true)
     pub fatigue_enabled: bool,
 
+    /// Enable health mechanic (default: true)
+    pub health_enabled: bool,
+
     // ===== Combat Modifiers =====
     /// Zombie damage multiplier (base: 2, sleeping: 7)
     pub zombie_damage_mult: f32,
@@ -263,6 +266,7 @@ struct SessionConfigOverrides {
     thirst_enabled: Option<bool>,
     thirst_rate: Option<u32>,
     fatigue_enabled: Option<bool>,
+    health_enabled: Option<bool>,
     zombie_damage_mult: Option<f32>,
     arrow_damage_mult: Option<f32>,
     player_damage_mult: Option<f32>,
@@ -343,6 +347,9 @@ impl SessionConfigOverrides {
         }
         if let Some(value) = self.fatigue_enabled {
             base.fatigue_enabled = value;
+        }
+        if let Some(value) = self.health_enabled {
+            base.health_enabled = value;
         }
         if let Some(value) = self.zombie_damage_mult {
             base.zombie_damage_mult = value;
@@ -538,6 +545,7 @@ impl Default for SessionConfig {
             thirst_enabled: true,
             thirst_rate: 20,
             fatigue_enabled: true,
+            health_enabled: true,
             zombie_damage_mult: 1.0,
             arrow_damage_mult: 1.0,
             player_damage_mult: 1.0,

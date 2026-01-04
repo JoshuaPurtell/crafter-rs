@@ -163,24 +163,24 @@ impl WorldGenerator {
             return Material::Path;
         }
 
-        // Coal: simplex(x, y, 1, 8) > 0 and random > 0.85
-        let coal_threshold = scaled_threshold(0.15, self.config.coal_density);
+        // Coal: simplex(x, y, 1, 8) > 0 and random > 0.70
+        let coal_threshold = scaled_threshold(0.30, self.config.coal_density);
         if self.simplex3_single(x, y, 1.0, 8.0) > 0.0
             && self.rng.gen::<f64>() > coal_threshold
         {
             return Material::Coal;
         }
 
-        // Iron: simplex(x, y, 2, 6) > 0.4 and random > 0.75
-        let iron_threshold = scaled_threshold(0.25, self.config.iron_density);
-        if self.simplex3_single(x, y, 2.0, 6.0) > 0.4
+        // Iron: simplex(x, y, 2, 6) > 0.3 and random > 0.70
+        let iron_threshold = scaled_threshold(0.30, self.config.iron_density);
+        if self.simplex3_single(x, y, 2.0, 6.0) > 0.3
             && self.rng.gen::<f64>() > iron_threshold
         {
             return Material::Iron;
         }
 
-        // Diamond: mountain > 0.18 and random > 0.994
-        let diamond_threshold = scaled_threshold(0.006, self.config.diamond_density);
+        // Diamond: mountain > 0.18 and random > 0.984
+        let diamond_threshold = scaled_threshold(0.016, self.config.diamond_density);
         if mountain > 0.18 && self.rng.gen::<f64>() > diamond_threshold {
             return Material::Diamond;
         }

@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent};
 use crafter_core::image_renderer::{ImageRenderer, ImageRendererConfig};
 use crafter_core::recording::{Recording, RecordingOptions, RecordingSession, ReplaySession};
-use crafter_core::{Achievements, GameObject, SaveData};
+use crafter_core::{Achievements, GameObject, Material, SaveData};
 use crafter_core::renderer::{Renderer, TextRenderer};
 use crafter_core::{Action, SessionConfig};
 use opentui_sys as ot;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::process::Command;
 
 pub const APP_ID: &str = "crafter";
@@ -28,6 +28,7 @@ pub struct CrafterKeyOutcome {
 pub enum CrafterCommand {
     Start { config: CrafterConfig },
     Stop,
+    StopAndDiscard,
     SetPaused(bool),
     Action(Action),
     Reset,
@@ -63,6 +64,9 @@ pub enum CrafterUpdate {
         tick: u64,
         achievements: Vec<String>,
         visible_mobs: Vec<MobPreview>,
+        density_lines: Vec<String>,
+        has_adjacent_table: bool,
+        has_adjacent_furnace: bool,
         // Inventory
         inventory: InventoryData,
     },
@@ -121,6 +125,7 @@ pub struct InventoryData {
 #[derive(Clone, Debug)]
 pub struct MobPreview {
     pub label: String,
+    pub detail: Option<String>,
     pub rgba: Option<Vec<u8>>,
     pub width: u32,
     pub height: u32,
@@ -197,7 +202,10 @@ pub struct CrafterState {
     pub events: Vec<String>,
     pub achievements: Vec<String>,
     pub visible_mobs: Vec<MobPreview>,
+    pub density_lines: Vec<String>,
     pub last_action: Option<Action>,
+    pub has_adjacent_table: bool,
+    pub has_adjacent_furnace: bool,
     pub inventory: InventoryData,
     // Recording/replay state
     pub recordings: Vec<RecordingInfo>,
@@ -221,6 +229,11 @@ pub struct CrafterState {
     pub profile_index: usize,
     pub rule_configs: Vec<RuleConfigEntry>,
     pub rule_config_index: usize,
+    pub show_rule_editor: bool,
+    pub rule_editor_index: usize,
+    pub rule_editor_path: Option<PathBuf>,
+    pub rule_editor_doc: Option<RuleConfigDoc>,
+    pub rule_editor_config: Option<SessionConfig>,
 }
 
 /// Craft menu items
@@ -265,8 +278,8 @@ impl Default for CrafterConfig {
     fn default() -> Self {
         Self {
             tick_rate: 10,
-            world_width: 48,
-            world_height: 20,
+            world_width: 64,
+            world_height: 64,
             random_seed: true,
             seed: 42,
             graphics_mode: true,
@@ -322,7 +335,10 @@ impl CrafterState {
             events: Vec::new(),
             achievements: Vec::new(),
             visible_mobs: Vec::new(),
+            density_lines: Vec::new(),
             last_action: None,
+            has_adjacent_table: false,
+            has_adjacent_furnace: false,
             inventory: InventoryData::default(),
             recordings: Vec::new(),
             selected_recording: 0,
@@ -343,6 +359,11 @@ impl CrafterState {
             profile_index,
             rule_configs,
             rule_config_index,
+            show_rule_editor: false,
+            rule_editor_index: 0,
+            rule_editor_path: None,
+            rule_editor_doc: None,
+            rule_editor_config: None,
         }
     }
 }
@@ -404,6 +425,394 @@ pub struct RuleConfigEntry {
     editable: bool,
     extension: String,
 }
+
+enum RuleConfigDoc {
+    Toml(toml::value::Table),
+    Yaml(serde_yaml::Mapping),
+}
+
+#[derive(Clone, Copy)]
+enum RuleEditorFieldId {
+    TreeDensity,
+    CoalDensity,
+    IronDensity,
+    DiamondDensity,
+    CowDensity,
+    ZombieDensity,
+    SkeletonDensity,
+    ZombieSpawnRate,
+    ZombieDespawnRate,
+    CowSpawnRate,
+    CowDespawnRate,
+    DayNightCycle,
+    HungerEnabled,
+    ThirstEnabled,
+    FatigueEnabled,
+    HealthEnabled,
+    CraftaxEnabled,
+    CraftaxMobsEnabled,
+    CraftaxWorldgenEnabled,
+    CraftaxItemsEnabled,
+    CraftaxCombatEnabled,
+    CraftaxChestsEnabled,
+    CraftaxPotionsEnabled,
+    CraftaxXpEnabled,
+    CraftaxAchievementsEnabled,
+    CraftaxOrcSoldierDensity,
+    CraftaxOrcMageDensity,
+    CraftaxKnightDensity,
+    CraftaxKnightArcherDensity,
+    CraftaxTrollDensity,
+    CraftaxBatDensity,
+    CraftaxSnailDensity,
+    CraftaxSapphireDensity,
+    CraftaxRubyDensity,
+    CraftaxChestDensity,
+    CraftaxPotionDropChance,
+    CraftaxArrowDropChance,
+    CraftaxGemDropChance,
+}
+
+#[derive(Clone, Copy)]
+enum RuleEditorFieldKind {
+    Float { step: f32, min: f32, max: f32 },
+    Bool,
+}
+
+#[derive(Clone, Copy)]
+struct RuleEditorField {
+    id: RuleEditorFieldId,
+    label: &'static str,
+    kind: RuleEditorFieldKind,
+    path: &'static [&'static str],
+}
+
+const RULE_EDITOR_FIELDS: &[RuleEditorField] = &[
+    RuleEditorField {
+        id: RuleEditorFieldId::TreeDensity,
+        label: "Tree density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 5.0,
+        },
+        path: &["tree_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CoalDensity,
+        label: "Coal density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 5.0,
+        },
+        path: &["coal_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::IronDensity,
+        label: "Iron density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 5.0,
+        },
+        path: &["iron_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::DiamondDensity,
+        label: "Diamond density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.01,
+            min: 0.0,
+            max: 1.0,
+        },
+        path: &["diamond_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CowDensity,
+        label: "Cow density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.01,
+            min: 0.0,
+            max: 1.0,
+        },
+        path: &["cow_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::ZombieDensity,
+        label: "Zombie density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.01,
+            min: 0.0,
+            max: 2.0,
+        },
+        path: &["zombie_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::SkeletonDensity,
+        label: "Skeleton density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.01,
+            min: 0.0,
+            max: 2.0,
+        },
+        path: &["skeleton_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::ZombieSpawnRate,
+        label: "Zombie spawn rate",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.01,
+            min: 0.0,
+            max: 1.0,
+        },
+        path: &["zombie_spawn_rate"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::ZombieDespawnRate,
+        label: "Zombie despawn rate",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.01,
+            min: 0.0,
+            max: 1.0,
+        },
+        path: &["zombie_despawn_rate"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CowSpawnRate,
+        label: "Cow spawn rate",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.01,
+            min: 0.0,
+            max: 1.0,
+        },
+        path: &["cow_spawn_rate"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CowDespawnRate,
+        label: "Cow despawn rate",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.01,
+            min: 0.0,
+            max: 1.0,
+        },
+        path: &["cow_despawn_rate"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::DayNightCycle,
+        label: "Day/night cycle",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["day_night_cycle"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::HungerEnabled,
+        label: "Hunger enabled",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["hunger_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::ThirstEnabled,
+        label: "Thirst enabled",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["thirst_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::FatigueEnabled,
+        label: "Energy enabled",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["fatigue_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::HealthEnabled,
+        label: "Health enabled",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["health_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxEnabled,
+        label: "Craftax enabled",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["craftax", "enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxMobsEnabled,
+        label: "Craftax mobs",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["craftax", "mobs_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxWorldgenEnabled,
+        label: "Craftax worldgen",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["craftax", "worldgen_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxItemsEnabled,
+        label: "Craftax items",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["craftax", "items_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxCombatEnabled,
+        label: "Craftax combat",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["craftax", "combat_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxChestsEnabled,
+        label: "Craftax chests",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["craftax", "chests_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxPotionsEnabled,
+        label: "Craftax potions",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["craftax", "potions_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxXpEnabled,
+        label: "Craftax XP",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["craftax", "xp_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxAchievementsEnabled,
+        label: "Craftax achievements",
+        kind: RuleEditorFieldKind::Bool,
+        path: &["craftax", "achievements_enabled"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxOrcSoldierDensity,
+        label: "Orc soldier density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 3.0,
+        },
+        path: &["craftax", "spawn", "orc_soldier_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxOrcMageDensity,
+        label: "Orc mage density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 3.0,
+        },
+        path: &["craftax", "spawn", "orc_mage_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxKnightDensity,
+        label: "Knight density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 3.0,
+        },
+        path: &["craftax", "spawn", "knight_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxKnightArcherDensity,
+        label: "Knight archer density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 3.0,
+        },
+        path: &["craftax", "spawn", "knight_archer_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxTrollDensity,
+        label: "Troll density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 3.0,
+        },
+        path: &["craftax", "spawn", "troll_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxBatDensity,
+        label: "Bat density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 3.0,
+        },
+        path: &["craftax", "spawn", "bat_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxSnailDensity,
+        label: "Snail density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 3.0,
+        },
+        path: &["craftax", "spawn", "snail_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxSapphireDensity,
+        label: "Sapphire density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 3.0,
+        },
+        path: &["craftax", "spawn", "sapphire_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxRubyDensity,
+        label: "Ruby density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 3.0,
+        },
+        path: &["craftax", "spawn", "ruby_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxChestDensity,
+        label: "Chest density",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 3.0,
+        },
+        path: &["craftax", "spawn", "chest_density"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxPotionDropChance,
+        label: "Potion drop chance",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 1.0,
+        },
+        path: &["craftax", "loot", "potion_drop_chance"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxArrowDropChance,
+        label: "Arrow drop chance",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 1.0,
+        },
+        path: &["craftax", "loot", "arrow_drop_chance"],
+    },
+    RuleEditorField {
+        id: RuleEditorFieldId::CraftaxGemDropChance,
+        label: "Gem drop chance",
+        kind: RuleEditorFieldKind::Float {
+            step: 0.05,
+            min: 0.0,
+            max: 1.0,
+        },
+        path: &["craftax", "loot", "gem_drop_chance"],
+    },
+];
 
 fn list_profiles() -> Vec<String> {
     let mut profiles = Vec::new();
@@ -492,6 +901,386 @@ fn builtin_rule_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+fn read_rule_config_doc(path: &Path) -> Option<RuleConfigDoc> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    match rule_config_extension(path) {
+        Some("yaml") | Some("yml") => {
+            let value: serde_yaml::Value = serde_yaml::from_str(&contents).ok()?;
+            match value {
+                serde_yaml::Value::Mapping(map) => Some(RuleConfigDoc::Yaml(map)),
+                _ => Some(RuleConfigDoc::Yaml(serde_yaml::Mapping::new())),
+            }
+        }
+        _ => {
+            let value: toml::Value = toml::from_str(&contents).ok()?;
+            match value {
+                toml::Value::Table(table) => Some(RuleConfigDoc::Toml(table)),
+                _ => Some(RuleConfigDoc::Toml(toml::value::Table::new())),
+            }
+        }
+    }
+}
+
+fn write_rule_config_doc(path: &Path, doc: &RuleConfigDoc) -> bool {
+    match doc {
+        RuleConfigDoc::Toml(table) => {
+            let value = toml::Value::Table(table.clone());
+            if let Ok(contents) = toml::to_string_pretty(&value) {
+                return std::fs::write(path, contents).is_ok();
+            }
+        }
+        RuleConfigDoc::Yaml(map) => {
+            let value = serde_yaml::Value::Mapping(map.clone());
+            if let Ok(contents) = serde_yaml::to_string(&value) {
+                return std::fs::write(path, contents).is_ok();
+            }
+        }
+    }
+    false
+}
+
+#[derive(Clone, Copy)]
+enum RuleEditorValue {
+    Float(f32),
+    Bool(bool),
+}
+
+fn rule_editor_value(config: &SessionConfig, id: RuleEditorFieldId) -> RuleEditorValue {
+    match id {
+        RuleEditorFieldId::TreeDensity => RuleEditorValue::Float(config.tree_density),
+        RuleEditorFieldId::CoalDensity => RuleEditorValue::Float(config.coal_density),
+        RuleEditorFieldId::IronDensity => RuleEditorValue::Float(config.iron_density),
+        RuleEditorFieldId::DiamondDensity => RuleEditorValue::Float(config.diamond_density),
+        RuleEditorFieldId::CowDensity => RuleEditorValue::Float(config.cow_density),
+        RuleEditorFieldId::ZombieDensity => RuleEditorValue::Float(config.zombie_density),
+        RuleEditorFieldId::SkeletonDensity => RuleEditorValue::Float(config.skeleton_density),
+        RuleEditorFieldId::ZombieSpawnRate => RuleEditorValue::Float(config.zombie_spawn_rate),
+        RuleEditorFieldId::ZombieDespawnRate => RuleEditorValue::Float(config.zombie_despawn_rate),
+        RuleEditorFieldId::CowSpawnRate => RuleEditorValue::Float(config.cow_spawn_rate),
+        RuleEditorFieldId::CowDespawnRate => RuleEditorValue::Float(config.cow_despawn_rate),
+        RuleEditorFieldId::DayNightCycle => RuleEditorValue::Bool(config.day_night_cycle),
+        RuleEditorFieldId::HungerEnabled => RuleEditorValue::Bool(config.hunger_enabled),
+        RuleEditorFieldId::ThirstEnabled => RuleEditorValue::Bool(config.thirst_enabled),
+        RuleEditorFieldId::FatigueEnabled => RuleEditorValue::Bool(config.fatigue_enabled),
+        RuleEditorFieldId::HealthEnabled => RuleEditorValue::Bool(config.health_enabled),
+        RuleEditorFieldId::CraftaxEnabled => RuleEditorValue::Bool(config.craftax.enabled),
+        RuleEditorFieldId::CraftaxMobsEnabled => {
+            RuleEditorValue::Bool(config.craftax.mobs_enabled)
+        }
+        RuleEditorFieldId::CraftaxWorldgenEnabled => {
+            RuleEditorValue::Bool(config.craftax.worldgen_enabled)
+        }
+        RuleEditorFieldId::CraftaxItemsEnabled => {
+            RuleEditorValue::Bool(config.craftax.items_enabled)
+        }
+        RuleEditorFieldId::CraftaxCombatEnabled => {
+            RuleEditorValue::Bool(config.craftax.combat_enabled)
+        }
+        RuleEditorFieldId::CraftaxChestsEnabled => {
+            RuleEditorValue::Bool(config.craftax.chests_enabled)
+        }
+        RuleEditorFieldId::CraftaxPotionsEnabled => {
+            RuleEditorValue::Bool(config.craftax.potions_enabled)
+        }
+        RuleEditorFieldId::CraftaxXpEnabled => RuleEditorValue::Bool(config.craftax.xp_enabled),
+        RuleEditorFieldId::CraftaxAchievementsEnabled => {
+            RuleEditorValue::Bool(config.craftax.achievements_enabled)
+        }
+        RuleEditorFieldId::CraftaxOrcSoldierDensity => {
+            RuleEditorValue::Float(config.craftax.spawn.orc_soldier_density)
+        }
+        RuleEditorFieldId::CraftaxOrcMageDensity => {
+            RuleEditorValue::Float(config.craftax.spawn.orc_mage_density)
+        }
+        RuleEditorFieldId::CraftaxKnightDensity => {
+            RuleEditorValue::Float(config.craftax.spawn.knight_density)
+        }
+        RuleEditorFieldId::CraftaxKnightArcherDensity => {
+            RuleEditorValue::Float(config.craftax.spawn.knight_archer_density)
+        }
+        RuleEditorFieldId::CraftaxTrollDensity => {
+            RuleEditorValue::Float(config.craftax.spawn.troll_density)
+        }
+        RuleEditorFieldId::CraftaxBatDensity => {
+            RuleEditorValue::Float(config.craftax.spawn.bat_density)
+        }
+        RuleEditorFieldId::CraftaxSnailDensity => {
+            RuleEditorValue::Float(config.craftax.spawn.snail_density)
+        }
+        RuleEditorFieldId::CraftaxSapphireDensity => {
+            RuleEditorValue::Float(config.craftax.spawn.sapphire_density)
+        }
+        RuleEditorFieldId::CraftaxRubyDensity => {
+            RuleEditorValue::Float(config.craftax.spawn.ruby_density)
+        }
+        RuleEditorFieldId::CraftaxChestDensity => {
+            RuleEditorValue::Float(config.craftax.spawn.chest_density)
+        }
+        RuleEditorFieldId::CraftaxPotionDropChance => {
+            RuleEditorValue::Float(config.craftax.loot.potion_drop_chance)
+        }
+        RuleEditorFieldId::CraftaxArrowDropChance => {
+            RuleEditorValue::Float(config.craftax.loot.arrow_drop_chance)
+        }
+        RuleEditorFieldId::CraftaxGemDropChance => {
+            RuleEditorValue::Float(config.craftax.loot.gem_drop_chance)
+        }
+    }
+}
+
+fn set_rule_editor_value(config: &mut SessionConfig, id: RuleEditorFieldId, value: RuleEditorValue) {
+    match (id, value) {
+        (RuleEditorFieldId::TreeDensity, RuleEditorValue::Float(val)) => config.tree_density = val,
+        (RuleEditorFieldId::CoalDensity, RuleEditorValue::Float(val)) => config.coal_density = val,
+        (RuleEditorFieldId::IronDensity, RuleEditorValue::Float(val)) => config.iron_density = val,
+        (RuleEditorFieldId::DiamondDensity, RuleEditorValue::Float(val)) => config.diamond_density = val,
+        (RuleEditorFieldId::CowDensity, RuleEditorValue::Float(val)) => config.cow_density = val,
+        (RuleEditorFieldId::ZombieDensity, RuleEditorValue::Float(val)) => config.zombie_density = val,
+        (RuleEditorFieldId::SkeletonDensity, RuleEditorValue::Float(val)) => config.skeleton_density = val,
+        (RuleEditorFieldId::ZombieSpawnRate, RuleEditorValue::Float(val)) => config.zombie_spawn_rate = val,
+        (RuleEditorFieldId::ZombieDespawnRate, RuleEditorValue::Float(val)) => config.zombie_despawn_rate = val,
+        (RuleEditorFieldId::CowSpawnRate, RuleEditorValue::Float(val)) => config.cow_spawn_rate = val,
+        (RuleEditorFieldId::CowDespawnRate, RuleEditorValue::Float(val)) => config.cow_despawn_rate = val,
+        (RuleEditorFieldId::DayNightCycle, RuleEditorValue::Bool(val)) => config.day_night_cycle = val,
+        (RuleEditorFieldId::HungerEnabled, RuleEditorValue::Bool(val)) => config.hunger_enabled = val,
+        (RuleEditorFieldId::ThirstEnabled, RuleEditorValue::Bool(val)) => config.thirst_enabled = val,
+        (RuleEditorFieldId::FatigueEnabled, RuleEditorValue::Bool(val)) => config.fatigue_enabled = val,
+        (RuleEditorFieldId::HealthEnabled, RuleEditorValue::Bool(val)) => config.health_enabled = val,
+        (RuleEditorFieldId::CraftaxEnabled, RuleEditorValue::Bool(val)) => config.craftax.enabled = val,
+        (RuleEditorFieldId::CraftaxMobsEnabled, RuleEditorValue::Bool(val)) => {
+            config.craftax.mobs_enabled = val;
+        }
+        (RuleEditorFieldId::CraftaxWorldgenEnabled, RuleEditorValue::Bool(val)) => {
+            config.craftax.worldgen_enabled = val;
+        }
+        (RuleEditorFieldId::CraftaxItemsEnabled, RuleEditorValue::Bool(val)) => {
+            config.craftax.items_enabled = val;
+        }
+        (RuleEditorFieldId::CraftaxCombatEnabled, RuleEditorValue::Bool(val)) => {
+            config.craftax.combat_enabled = val;
+        }
+        (RuleEditorFieldId::CraftaxChestsEnabled, RuleEditorValue::Bool(val)) => {
+            config.craftax.chests_enabled = val;
+        }
+        (RuleEditorFieldId::CraftaxPotionsEnabled, RuleEditorValue::Bool(val)) => {
+            config.craftax.potions_enabled = val;
+        }
+        (RuleEditorFieldId::CraftaxXpEnabled, RuleEditorValue::Bool(val)) => {
+            config.craftax.xp_enabled = val;
+        }
+        (RuleEditorFieldId::CraftaxAchievementsEnabled, RuleEditorValue::Bool(val)) => {
+            config.craftax.achievements_enabled = val;
+        }
+        (RuleEditorFieldId::CraftaxOrcSoldierDensity, RuleEditorValue::Float(val)) => {
+            config.craftax.spawn.orc_soldier_density = val;
+        }
+        (RuleEditorFieldId::CraftaxOrcMageDensity, RuleEditorValue::Float(val)) => {
+            config.craftax.spawn.orc_mage_density = val;
+        }
+        (RuleEditorFieldId::CraftaxKnightDensity, RuleEditorValue::Float(val)) => {
+            config.craftax.spawn.knight_density = val;
+        }
+        (RuleEditorFieldId::CraftaxKnightArcherDensity, RuleEditorValue::Float(val)) => {
+            config.craftax.spawn.knight_archer_density = val;
+        }
+        (RuleEditorFieldId::CraftaxTrollDensity, RuleEditorValue::Float(val)) => {
+            config.craftax.spawn.troll_density = val;
+        }
+        (RuleEditorFieldId::CraftaxBatDensity, RuleEditorValue::Float(val)) => {
+            config.craftax.spawn.bat_density = val;
+        }
+        (RuleEditorFieldId::CraftaxSnailDensity, RuleEditorValue::Float(val)) => {
+            config.craftax.spawn.snail_density = val;
+        }
+        (RuleEditorFieldId::CraftaxSapphireDensity, RuleEditorValue::Float(val)) => {
+            config.craftax.spawn.sapphire_density = val;
+        }
+        (RuleEditorFieldId::CraftaxRubyDensity, RuleEditorValue::Float(val)) => {
+            config.craftax.spawn.ruby_density = val;
+        }
+        (RuleEditorFieldId::CraftaxChestDensity, RuleEditorValue::Float(val)) => {
+            config.craftax.spawn.chest_density = val;
+        }
+        (RuleEditorFieldId::CraftaxPotionDropChance, RuleEditorValue::Float(val)) => {
+            config.craftax.loot.potion_drop_chance = val;
+        }
+        (RuleEditorFieldId::CraftaxArrowDropChance, RuleEditorValue::Float(val)) => {
+            config.craftax.loot.arrow_drop_chance = val;
+        }
+        (RuleEditorFieldId::CraftaxGemDropChance, RuleEditorValue::Float(val)) => {
+            config.craftax.loot.gem_drop_chance = val;
+        }
+        _ => {}
+    }
+}
+
+fn rule_editor_value_label(config: &SessionConfig, field: RuleEditorField) -> String {
+    match rule_editor_value(config, field.id) {
+        RuleEditorValue::Float(val) => format!("{:.2}", val),
+        RuleEditorValue::Bool(val) => {
+            if val {
+                "On".to_string()
+            } else {
+                "Off".to_string()
+            }
+        }
+    }
+}
+
+fn adjust_rule_editor_value(
+    config: &mut SessionConfig,
+    field: RuleEditorField,
+    direction: i32,
+) {
+    match field.kind {
+        RuleEditorFieldKind::Bool => {
+            let current = rule_editor_value(config, field.id);
+            if let RuleEditorValue::Bool(val) = current {
+                set_rule_editor_value(config, field.id, RuleEditorValue::Bool(!val));
+            }
+        }
+        RuleEditorFieldKind::Float { step, min, max } => {
+            let current = rule_editor_value(config, field.id);
+            if let RuleEditorValue::Float(val) = current {
+                let delta = step * direction as f32;
+                let next = (val + delta).clamp(min, max);
+                set_rule_editor_value(config, field.id, RuleEditorValue::Float(next));
+            }
+        }
+    }
+}
+
+fn set_doc_value(doc: &mut RuleConfigDoc, path: &[&str], value: RuleEditorValue) {
+    match doc {
+        RuleConfigDoc::Toml(table) => {
+            let toml_value = match value {
+                RuleEditorValue::Float(val) => toml::Value::Float(val as f64),
+                RuleEditorValue::Bool(val) => toml::Value::Boolean(val),
+            };
+            set_toml_value(table, path, toml_value);
+        }
+        RuleConfigDoc::Yaml(map) => {
+            let yaml_value = match value {
+                RuleEditorValue::Float(val) => serde_yaml::Value::from(val as f64),
+                RuleEditorValue::Bool(val) => serde_yaml::Value::Bool(val),
+            };
+            set_yaml_value(map, path, yaml_value);
+        }
+    }
+}
+
+fn set_toml_value(table: &mut toml::value::Table, path: &[&str], value: toml::Value) {
+    if path.is_empty() {
+        return;
+    }
+    if path.len() == 1 {
+        table.insert(path[0].to_string(), value);
+        return;
+    }
+    let entry = table
+        .entry(path[0].to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    if let toml::Value::Table(ref mut inner) = entry {
+        set_toml_value(inner, &path[1..], value);
+    } else {
+        *entry = toml::Value::Table(toml::value::Table::new());
+        if let toml::Value::Table(ref mut inner) = entry {
+            set_toml_value(inner, &path[1..], value);
+        }
+    }
+}
+
+fn set_yaml_value(map: &mut serde_yaml::Mapping, path: &[&str], value: serde_yaml::Value) {
+    if path.is_empty() {
+        return;
+    }
+    let key = serde_yaml::Value::String(path[0].to_string());
+    if path.len() == 1 {
+        map.insert(key, value);
+        return;
+    }
+    let entry = map
+        .entry(key)
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if let serde_yaml::Value::Mapping(ref mut inner) = entry {
+        set_yaml_value(inner, &path[1..], value);
+    } else {
+        *entry = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        if let serde_yaml::Value::Mapping(ref mut inner) = entry {
+            set_yaml_value(inner, &path[1..], value);
+        }
+    }
+}
+
+fn open_rule_editor(state: &mut CrafterState) -> bool {
+    let mut entry = match state.rule_configs.get(state.rule_config_index) {
+        Some(entry) => entry.clone(),
+        None => return false,
+    };
+
+    if !entry.editable {
+        if let Some(name) = create_rule_config_from_selected(state) {
+            refresh_rule_configs(state);
+            state.rule_config_index = rule_config_index(&state.rule_configs, &name);
+            state.config.rule_config = name;
+            if let Some(updated) = state.rule_configs.get(state.rule_config_index) {
+                entry = updated.clone();
+            }
+        }
+    }
+
+    let path = match entry.path.clone() {
+        Some(path) => path,
+        None => return false,
+    };
+    let config = match SessionConfig::load_from_path(&path) {
+        Ok(config) => config,
+        Err(err) => {
+            state.status = format!("Rule config error: {}", err);
+            return false;
+        }
+    };
+    let doc = read_rule_config_doc(&path).unwrap_or_else(|| {
+        if entry.extension == "yaml" || entry.extension == "yml" {
+            RuleConfigDoc::Yaml(serde_yaml::Mapping::new())
+        } else {
+            RuleConfigDoc::Toml(toml::value::Table::new())
+        }
+    });
+
+    state.show_rule_editor = true;
+    state.rule_editor_index = 0;
+    state.rule_editor_path = Some(path);
+    state.rule_editor_doc = Some(doc);
+    state.rule_editor_config = Some(config);
+    state.show_config_menu = false;
+    true
+}
+
+fn save_rule_editor(state: &mut CrafterState) -> bool {
+    let path = match state.rule_editor_path.clone() {
+        Some(path) => path,
+        None => return false,
+    };
+    let config = match state.rule_editor_config.as_ref() {
+        Some(config) => config,
+        None => return false,
+    };
+    let mut doc = match state.rule_editor_doc.take() {
+        Some(doc) => doc,
+        None => return false,
+    };
+
+    for field in RULE_EDITOR_FIELDS {
+        let value = rule_editor_value(config, field.id);
+        set_doc_value(&mut doc, field.path, value);
+    }
+
+    let ok = write_rule_config_doc(&path, &doc);
+    state.rule_editor_doc = Some(doc);
+    ok
+}
+
 fn rule_config_index(configs: &[RuleConfigEntry], name: &str) -> usize {
     configs
         .iter()
@@ -570,8 +1359,16 @@ fn create_rule_config_from_selected_with_ext(
         .get(state.rule_config_index)
         .and_then(|entry| entry.path.clone());
 
-    if let Some(source_path) = source {
-        let _ = std::fs::copy(source_path, &target);
+    let should_copy = source
+        .as_ref()
+        .and_then(|path| rule_config_extension(path))
+        .map(|source_ext| source_ext == ext || (source_ext == "yaml" && ext == "yml") || (source_ext == "yml" && ext == "yaml"))
+        .unwrap_or(false);
+
+    if should_copy {
+        if let Some(source_path) = source {
+            let _ = std::fs::copy(source_path, &target);
+        }
     } else {
         let contents = if ext == "yaml" || ext == "yml" {
             format!("base: \"{}\"\n", default_rule_config_name())
@@ -847,6 +1644,9 @@ fn make_frame_update(
     newly_unlocked: Vec<String>,
 ) -> CrafterUpdate {
     let visible_mobs = visible_mob_previews(state);
+    let density_lines = map_density_lines(state);
+    let has_adjacent_table = has_adjacent_table(state);
+    let has_adjacent_furnace = has_adjacent_furnace(state);
     if graphics_mode {
         let (rgba_data, pixel_w, pixel_h, _cells_w, _cells_h) =
             render_state_graphics(state, tile_size);
@@ -863,6 +1663,9 @@ fn make_frame_update(
             tick: state.step,
             achievements: newly_unlocked,
             visible_mobs,
+            density_lines,
+            has_adjacent_table,
+            has_adjacent_furnace,
             inventory: InventoryData::from_crafter(&state.inventory),
         }
     } else {
@@ -880,6 +1683,9 @@ fn make_frame_update(
             tick: state.step,
             achievements: newly_unlocked,
             visible_mobs,
+            density_lines,
+            has_adjacent_table,
+            has_adjacent_furnace,
             inventory: InventoryData::from_crafter(&state.inventory),
         }
     }
@@ -897,8 +1703,8 @@ pub fn spawn_crafter_loop(
         let mut last_tick = Instant::now();
         let mut recording_session: Option<RecordingSession> = None;
         let mut pending_action = Action::Noop;
-        let mut frame_width = 48u32;
-        let mut frame_height = 24u32;
+        let mut frame_width = 64u32;
+        let mut frame_height = 64u32;
         let mut current_seed: Option<u64> = None;
         let mut graphics_mode = true;
         let mut tile_size = 10u32;
@@ -948,6 +1754,7 @@ pub fn spawn_crafter_loop(
                             world_size: (frame_width, frame_height),
                             seed,
                             view_radius: 3,
+                            full_world_state: true,
                             time_mode: if logical_time {
                                 crafter_core::TimeMode::Logical
                             } else {
@@ -1007,6 +1814,21 @@ pub fn spawn_crafter_loop(
                         });
                         let _ = tx.send(CrafterUpdate::Status {
                             message: "Stopped".to_string(),
+                        });
+                    }
+                    CrafterCommand::StopAndDiscard => {
+                        recording_session = None;
+                        replay_session = None;
+                        running = false;
+                        paused = false;
+                        let _ = tx.send(CrafterUpdate::Running { running: false });
+                        let _ = tx.send(CrafterUpdate::ReplayMode {
+                            active: false,
+                            current_step: 0,
+                            total_steps: 0,
+                        });
+                        let _ = tx.send(CrafterUpdate::Status {
+                            message: "Session discarded".to_string(),
                         });
                     }
                     CrafterCommand::SetPaused(pause) => {
@@ -1093,6 +1915,7 @@ pub fn spawn_crafter_loop(
                             world_size: (frame_width, frame_height),
                             seed: current_seed,
                             view_radius: 3,
+                            full_world_state: true,
                             ..Default::default()
                         };
                         recording_session =
@@ -1494,7 +2317,7 @@ fn visible_mob_previews(state: &crafter_core::GameState) -> Vec<MobPreview> {
 
     let mut previews = std::collections::HashMap::<char, MobPreview>::new();
     for (_, _, obj) in &view.objects {
-        if let Some((ch, name)) = mob_char_name(obj) {
+        if let Some((ch, name, detail)) = mob_info(obj) {
             if previews.contains_key(&ch) {
                 continue;
             }
@@ -1506,6 +2329,7 @@ fn visible_mob_previews(state: &crafter_core::GameState) -> Vec<MobPreview> {
                 ch,
                 MobPreview {
                     label: format!("{} = {}", ch, name),
+                    detail: Some(detail),
                     rgba,
                     width,
                     height,
@@ -1536,22 +2360,310 @@ fn visible_mob_previews(state: &crafter_core::GameState) -> Vec<MobPreview> {
     lines
 }
 
-fn mob_char_name(obj: &GameObject) -> Option<(char, &'static str)> {
+fn has_adjacent_table(state: &crafter_core::GameState) -> bool {
+    if let Some(ref world) = state.world {
+        return world.has_adjacent_table(state.player_pos);
+    }
+    state
+        .view
+        .as_ref()
+        .map(|view| has_adjacent_material_in_view(view, Material::Table))
+        .unwrap_or(false)
+}
+
+fn has_adjacent_furnace(state: &crafter_core::GameState) -> bool {
+    if let Some(ref world) = state.world {
+        return world.has_adjacent_furnace(state.player_pos);
+    }
+    state
+        .view
+        .as_ref()
+        .map(|view| has_adjacent_material_in_view(view, Material::Furnace))
+        .unwrap_or(false)
+}
+
+fn has_adjacent_material_in_view(
+    view: &crafter_core::world::WorldView,
+    material: Material,
+) -> bool {
+    let center = view.radius as i32;
+    let neighbors = [
+        (center - 1, center),
+        (center + 1, center),
+        (center, center - 1),
+        (center, center + 1),
+    ];
+    neighbors.iter().any(|&(x, y)| {
+        view.is_in_bounds(x, y) && view.get_material(x, y) == Some(material)
+    })
+}
+
+fn mob_info(obj: &GameObject) -> Option<(char, &'static str, String)> {
     match obj {
-        GameObject::Zombie(_) => Some(('Z', "Zombie")),
-        GameObject::Skeleton(_) => Some(('S', "Skeleton")),
-        GameObject::Cow(_) => Some(('C', "Cow (food)")),
+        GameObject::Zombie(zombie) => Some((
+            'Z',
+            "Zombie",
+            format!(
+                "{}; melee dmg2 (sleep 7) cd5",
+                hits_summary(zombie.health)
+            ),
+        )),
+        GameObject::Skeleton(skeleton) => Some((
+            'S',
+            "Skeleton",
+            format!(
+                "{}; arrows dmg2, reload4, shoot<=5, flee<=3",
+                hits_summary(skeleton.health)
+            ),
+        )),
+        GameObject::Cow(cow) => Some((
+            'C',
+            "Cow (food)",
+            format!("{}; food +6 on kill", hits_summary(cow.health)),
+        )),
         GameObject::CraftaxMob(mob) => match mob.kind {
-            crafter_core::entity::CraftaxMobKind::OrcSoldier => Some(('O', "Orc")),
-            crafter_core::entity::CraftaxMobKind::OrcMage => Some(('M', "Orc Mage")),
-            crafter_core::entity::CraftaxMobKind::Knight => Some(('K', "Knight")),
-            crafter_core::entity::CraftaxMobKind::KnightArcher => Some(('A', "Archer")),
-            crafter_core::entity::CraftaxMobKind::Troll => Some(('t', "Troll")),
-            crafter_core::entity::CraftaxMobKind::Bat => Some(('B', "Bat")),
-            crafter_core::entity::CraftaxMobKind::Snail => Some(('N', "Snail")),
+            crafter_core::entity::CraftaxMobKind::OrcSoldier => Some((
+                'O',
+                "Orc",
+                format_craftax_detail(mob.health, mob.kind),
+            )),
+            crafter_core::entity::CraftaxMobKind::OrcMage => Some((
+                'M',
+                "Orc Mage",
+                format_craftax_detail(mob.health, mob.kind),
+            )),
+            crafter_core::entity::CraftaxMobKind::Knight => Some((
+                'K',
+                "Knight",
+                format_craftax_detail(mob.health, mob.kind),
+            )),
+            crafter_core::entity::CraftaxMobKind::KnightArcher => Some((
+                'A',
+                "Archer",
+                format_craftax_detail(mob.health, mob.kind),
+            )),
+            crafter_core::entity::CraftaxMobKind::Troll => Some((
+                't',
+                "Troll",
+                format_craftax_detail(mob.health, mob.kind),
+            )),
+            crafter_core::entity::CraftaxMobKind::Bat => Some((
+                'B',
+                "Bat",
+                format_craftax_detail(mob.health, mob.kind),
+            )),
+            crafter_core::entity::CraftaxMobKind::Snail => Some((
+                'N',
+                "Snail",
+                format_craftax_detail(mob.health, mob.kind),
+            )),
         },
         _ => None,
     }
+}
+
+fn hits_summary(health: u8) -> String {
+    let hits = [
+        hits_to_kill(health, 1),
+        hits_to_kill(health, 2),
+        hits_to_kill(health, 3),
+        hits_to_kill(health, 5),
+        hits_to_kill(health, 8),
+    ];
+    format!(
+        "HP{} hits H/W/S/I/D={}/{}/{}/{}/{}",
+        health, hits[0], hits[1], hits[2], hits[3], hits[4]
+    )
+}
+
+fn hits_to_kill(health: u8, damage: u8) -> u8 {
+    if damage == 0 {
+        return 0;
+    }
+    (health + damage - 1) / damage
+}
+
+fn format_craftax_detail(health: u8, kind: crafter_core::entity::CraftaxMobKind) -> String {
+    let stats = crafter_core::craftax::mobs::stats(kind);
+    let mut detail = hits_summary(health);
+    if stats.is_melee() && stats.is_ranged() {
+        detail.push_str(&format!(
+            "; melee {} ranged {} rng{} cd{}",
+            stats.melee_damage, stats.ranged_damage, stats.range, stats.cooldown
+        ));
+    } else if stats.is_ranged() {
+        detail.push_str(&format!(
+            "; ranged {} rng{} cd{}",
+            stats.ranged_damage, stats.range, stats.cooldown
+        ));
+    } else if stats.is_melee() {
+        detail.push_str(&format!("; melee {} cd{}", stats.melee_damage, stats.cooldown));
+    } else {
+        detail.push_str("; harmless");
+    }
+    detail
+}
+
+fn craft_menu_indices(crafter: &CrafterState) -> Vec<usize> {
+    if !crafter.has_adjacent_table {
+        return Vec::new();
+    }
+    let craftax_items_enabled = load_session_config(&crafter.config)
+        .map(|config| config.craftax.enabled && config.craftax.items_enabled)
+        .unwrap_or(true);
+    let has_furnace = crafter.has_adjacent_furnace;
+    let inv = &crafter.inventory;
+    let mut indices = Vec::new();
+    for (idx, (_, action, _)) in CRAFT_ITEMS.iter().enumerate() {
+        let is_craftax_item = matches!(
+            action,
+            Action::MakeDiamondPickaxe
+                | Action::MakeDiamondSword
+                | Action::MakeIronArmor
+                | Action::MakeDiamondArmor
+                | Action::MakeBow
+                | Action::MakeArrow
+        );
+        if is_craftax_item && !craftax_items_enabled {
+            continue;
+        }
+
+        let can_craft = match action {
+            Action::MakeWoodPickaxe => inv.wood >= 1,
+            Action::MakeStonePickaxe => inv.wood >= 1 && inv.stone >= 1,
+            Action::MakeIronPickaxe => has_furnace && inv.wood >= 1 && inv.coal >= 1 && inv.iron >= 1,
+            Action::MakeDiamondPickaxe => inv.wood >= 1 && inv.diamond >= 1,
+            Action::MakeWoodSword => inv.wood >= 1,
+            Action::MakeStoneSword => inv.wood >= 1 && inv.stone >= 1,
+            Action::MakeIronSword => has_furnace && inv.wood >= 1 && inv.coal >= 1 && inv.iron >= 1,
+            Action::MakeDiamondSword => inv.wood >= 1 && inv.diamond >= 2,
+            Action::MakeIronArmor => has_furnace && inv.iron >= 3 && inv.coal >= 3,
+            Action::MakeDiamondArmor => inv.diamond >= 3,
+            Action::MakeBow => inv.wood >= 2,
+            Action::MakeArrow => inv.wood >= 1 && inv.stone >= 1,
+            _ => false,
+        };
+        if can_craft {
+            indices.push(idx);
+        }
+    }
+    indices
+}
+
+fn map_density_lines(state: &crafter_core::GameState) -> Vec<String> {
+    let world = match &state.world {
+        Some(world) => world,
+        None => return vec!["Map density unavailable".to_string()],
+    };
+
+    let total_tiles = (world.area.0 as usize).saturating_mul(world.area.1 as usize).max(1);
+    let mut tree = 0usize;
+    let mut coal = 0usize;
+    let mut iron = 0usize;
+    let mut diamond = 0usize;
+    let mut sapphire = 0usize;
+    let mut ruby = 0usize;
+    let mut chest = 0usize;
+
+    for mat in &world.materials {
+        match *mat {
+            crafter_core::material::Material::Tree => tree += 1,
+            crafter_core::material::Material::Coal => coal += 1,
+            crafter_core::material::Material::Iron => iron += 1,
+            crafter_core::material::Material::Diamond => diamond += 1,
+            crafter_core::material::Material::Sapphire => sapphire += 1,
+            crafter_core::material::Material::Ruby => ruby += 1,
+            crafter_core::material::Material::Chest => chest += 1,
+            _ => {}
+        }
+    }
+
+    let mut cow = 0usize;
+    let mut zombie = 0usize;
+    let mut skeleton = 0usize;
+    let mut orc = 0usize;
+    let mut mage = 0usize;
+    let mut knight = 0usize;
+    let mut archer = 0usize;
+    let mut troll = 0usize;
+    let mut bat = 0usize;
+    let mut snail = 0usize;
+
+    for obj in world.objects.values() {
+        match obj {
+            GameObject::Cow(_) => cow += 1,
+            GameObject::Zombie(_) => zombie += 1,
+            GameObject::Skeleton(_) => skeleton += 1,
+            GameObject::CraftaxMob(mob) => match mob.kind {
+                crafter_core::entity::CraftaxMobKind::OrcSoldier => orc += 1,
+                crafter_core::entity::CraftaxMobKind::OrcMage => mage += 1,
+                crafter_core::entity::CraftaxMobKind::Knight => knight += 1,
+                crafter_core::entity::CraftaxMobKind::KnightArcher => archer += 1,
+                crafter_core::entity::CraftaxMobKind::Troll => troll += 1,
+                crafter_core::entity::CraftaxMobKind::Bat => bat += 1,
+                crafter_core::entity::CraftaxMobKind::Snail => snail += 1,
+            },
+            _ => {}
+        }
+    }
+
+    let entries = [
+        ("Tree", tree),
+        ("Coal", coal),
+        ("Iron", iron),
+        ("Diamond", diamond),
+        ("Sapphire", sapphire),
+        ("Ruby", ruby),
+        ("Chest", chest),
+        ("Cow", cow),
+        ("Zombie", zombie),
+        ("Skeleton", skeleton),
+        ("Orc", orc),
+        ("Mage", mage),
+        ("Knight", knight),
+        ("Archer", archer),
+        ("Troll", troll),
+        ("Bat", bat),
+        ("Snail", snail),
+    ];
+
+    let mut labels = Vec::new();
+    for (name, count) in entries {
+        let pct = ((count * 100) as f32 / total_tiles as f32).round() as u32;
+        let pct_label = if count > 0 && pct == 0 {
+            "<1%".to_string()
+        } else {
+            format!("{}%", pct)
+        };
+        labels.push(format!("{} {} ({})", name, count, pct_label));
+    }
+
+    let max_len = labels.iter().map(|s| s.len()).max().unwrap_or(0);
+    let col_width = (max_len + 2).max(10);
+    let columns = 2usize;
+    let rows = (labels.len() + columns - 1) / columns;
+    let mut lines = Vec::new();
+
+    for row in 0..rows {
+        let mut line = String::new();
+        for col in 0..columns {
+            let idx = col * rows + row;
+            if idx >= labels.len() {
+                continue;
+            }
+            let entry = &labels[idx];
+            if col > 0 {
+                let pad = col_width.saturating_sub(line.len());
+                for _ in 0..pad {
+                    line.push(' ');
+                }
+            }
+            line.push_str(entry);
+        }
+        lines.push(line);
+    }
+
+    lines
 }
 
 fn render_state_graphics(
@@ -1675,6 +2787,12 @@ pub fn handle_key(
     }
 
     if crafter.show_craft_menu {
+        let craft_indices = craft_menu_indices(crafter);
+        if craft_indices.is_empty() {
+            crafter.craft_selection = 0;
+        } else if crafter.craft_selection >= craft_indices.len() {
+            crafter.craft_selection = craft_indices.len().saturating_sub(1);
+        }
         let handled = match key.code {
             KeyCode::Esc => {
                 crafter.show_craft_menu = false;
@@ -1687,14 +2805,15 @@ pub fn handle_key(
                 true
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if crafter.craft_selection + 1 < CRAFT_ITEMS.len() {
+                if crafter.craft_selection + 1 < craft_indices.len() {
                     crafter.craft_selection += 1;
                 }
                 true
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                if let Some((_, action, _)) = CRAFT_ITEMS.get(crafter.craft_selection) {
-                    let _ = cmd_tx.send(CrafterCommand::Action(*action));
+                if let Some(&idx) = craft_indices.get(crafter.craft_selection) {
+                    let (_, action, _) = CRAFT_ITEMS[idx];
+                    let _ = cmd_tx.send(CrafterCommand::Action(action));
                     crafter.show_craft_menu = false;
                 }
                 true
@@ -1730,6 +2849,58 @@ pub fn handle_key(
                     let _ = cmd_tx.send(CrafterCommand::Action(*action));
                     crafter.show_place_menu = false;
                 }
+                true
+            }
+            _ => false,
+        };
+        return CrafterKeyOutcome {
+            handled,
+            graphics_mode_update,
+        };
+    }
+
+    if crafter.show_rule_editor {
+        let handled = match key.code {
+            KeyCode::Esc => {
+                crafter.show_rule_editor = false;
+                crafter.show_config_menu = true;
+                true
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if crafter.rule_editor_index > 0 {
+                    crafter.rule_editor_index -= 1;
+                }
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if crafter.rule_editor_index + 1 < RULE_EDITOR_FIELDS.len() {
+                    crafter.rule_editor_index += 1;
+                }
+                true
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if let Some(config) = crafter.rule_editor_config.as_mut() {
+                    let field = RULE_EDITOR_FIELDS[crafter.rule_editor_index];
+                    adjust_rule_editor_value(config, field, -1);
+                }
+                true
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                if let Some(config) = crafter.rule_editor_config.as_mut() {
+                    let field = RULE_EDITOR_FIELDS[crafter.rule_editor_index];
+                    adjust_rule_editor_value(config, field, 1);
+                }
+                true
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                if save_rule_editor(crafter) {
+                    refresh_rule_configs(crafter);
+                    crafter.status = "Saved rule config".to_string();
+                } else {
+                    crafter.status = "Failed to save rule config".to_string();
+                }
+                crafter.show_rule_editor = false;
+                crafter.show_config_menu = true;
                 true
             }
             _ => false,
@@ -1885,9 +3056,8 @@ pub fn handle_key(
             }
             KeyCode::Char('e') | KeyCode::Char('E') => {
                 if crafter.config_selection == 1 {
-                    if edit_selected_rule_config(crafter) {
-                        refresh_rule_configs(crafter);
-                        crafter.status = "Edited rule config".to_string();
+                    if open_rule_editor(crafter) {
+                        crafter.status = "Editing rule config".to_string();
                     } else {
                         crafter.status = "Cannot edit rule config".to_string();
                     }
@@ -1947,6 +3117,17 @@ pub fn handle_key(
             }
             true
         }
+        KeyCode::Char('m') | KeyCode::Char('M') => {
+            if crafter.input_capture && crafter.running && !crafter.replay_active {
+                if crafter.has_adjacent_table {
+                    crafter.show_craft_menu = true;
+                    crafter.craft_selection = 0;
+                } else {
+                    crafter.status = "Need a table nearby to craft.".to_string();
+                }
+            }
+            true
+        }
         KeyCode::Char('b') | KeyCode::Char('B') => {
             if crafter.replay_active && crafter.paused {
                 let _ = cmd_tx.send(CrafterCommand::BranchFromReplay);
@@ -1965,16 +3146,32 @@ pub fn handle_key(
                     config: crafter.config.clone(),
                 });
                 crafter.input_capture = true;
+            } else if crafter.input_capture {
+                if crafter.has_adjacent_table {
+                    crafter.show_craft_menu = true;
+                    crafter.craft_selection = 0;
+                } else {
+                    crafter.status = "Need a table nearby to craft.".to_string();
+                }
             } else {
                 crafter.input_capture = !crafter.input_capture;
             }
             true
         }
         KeyCode::Char('p') | KeyCode::Char('P') => {
-            if crafter.input_capture && crafter.running && !crafter.replay_active {
+            if crafter.running && crafter.paused {
+                let _ = cmd_tx.send(CrafterCommand::SetPaused(false));
+            } else if crafter.input_capture && crafter.running && !crafter.replay_active {
                 let _ = cmd_tx.send(CrafterCommand::Action(Action::PlacePlant));
             } else if crafter.running {
                 let _ = cmd_tx.send(CrafterCommand::SetPaused(!crafter.paused));
+            }
+            true
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            if crafter.running && crafter.paused && !crafter.replay_active {
+                let _ = cmd_tx.send(CrafterCommand::StopAndDiscard);
+                crafter.input_capture = false;
             }
             true
         }
@@ -2038,22 +3235,34 @@ pub fn handle_key(
             let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeStonePickaxe));
             true
         }
-        KeyCode::Char('3') if crafter.input_capture => {
-            let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeIronPickaxe));
-            true
-        }
-        KeyCode::Char('4') if crafter.input_capture => {
-            let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeWoodSword));
-            true
-        }
-        KeyCode::Char('5') if crafter.input_capture => {
-            let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeStoneSword));
-            true
-        }
-        KeyCode::Char('6') if crafter.input_capture => {
-            let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeIronSword));
-            true
-        }
+            KeyCode::Char('3') if crafter.input_capture => {
+                let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeIronPickaxe));
+                true
+            }
+            KeyCode::Char('4') if crafter.input_capture => {
+                let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeWoodSword));
+                true
+            }
+            KeyCode::Char('5') if crafter.input_capture => {
+                let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeStoneSword));
+                true
+            }
+            KeyCode::Char('6') if crafter.input_capture => {
+                let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeIronSword));
+                true
+            }
+            KeyCode::Char('7') if crafter.input_capture => {
+                let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeDiamondPickaxe));
+                true
+            }
+            KeyCode::Char('8') if crafter.input_capture => {
+                let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeDiamondSword));
+                true
+            }
+            KeyCode::Char('9') if crafter.input_capture => {
+                let _ = cmd_tx.send(CrafterCommand::Action(Action::MakeDiamondArmor));
+                true
+            }
         KeyCode::Char('g') | KeyCode::Char('G') if crafter.input_capture => {
             let _ = cmd_tx.send(CrafterCommand::Action(Action::ShootArrow));
             true
@@ -2131,6 +3340,9 @@ pub fn drain_updates(crafter: &mut CrafterState, rx: &Receiver<CrafterUpdate>) {
                 tick,
                 achievements,
                 visible_mobs,
+                density_lines,
+                has_adjacent_table,
+                has_adjacent_furnace,
                 inventory,
             } => {
                 crafter.frame_lines = lines;
@@ -2147,6 +3359,9 @@ pub fn drain_updates(crafter: &mut CrafterState, rx: &Receiver<CrafterUpdate>) {
                 crafter.energy = energy;
                 crafter.tick = tick;
                 crafter.visible_mobs = visible_mobs;
+                crafter.density_lines = density_lines;
+                crafter.has_adjacent_table = has_adjacent_table;
+                crafter.has_adjacent_furnace = has_adjacent_furnace;
                 for ach in achievements {
                     if !crafter.achievements.contains(&ach) {
                         crafter.achievements.push(ach);
@@ -2229,10 +3444,11 @@ pub fn draw_list(
         )
     } else {
         format!(
-            "HP: {}  Food: {}  Drink: {}  {}",
+            "HP: {}  Food: {}  Drink: {}  Energy: {}  {}",
             crafter.health,
             crafter.food,
             crafter.thirst,
+            crafter.energy,
             if crafter.paused {
                 "[PAUSED]"
             } else if crafter.input_capture {
@@ -2257,6 +3473,95 @@ pub fn draw_list(
 
     let y_start = 5u32;
     let max_y = height.saturating_sub(4);
+
+    if crafter.show_rule_editor {
+        let menu_header = "=== RULE CONFIG ===";
+        unsafe {
+            ot::bufferDrawText(
+                buffer,
+                menu_header.as_bytes().as_ptr(),
+                menu_header.len(),
+                2,
+                y_start,
+                fg.as_ptr(),
+                std::ptr::null(),
+                0,
+            );
+        }
+
+        let mut y = y_start + 1;
+        if let Some(path) = crafter.rule_editor_path.as_ref() {
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("rule config");
+            let header = format!("Editing: {}", name);
+            if y < max_y {
+                unsafe {
+                    ot::bufferDrawText(
+                        buffer,
+                        header.as_bytes().as_ptr(),
+                        header.len(),
+                        2,
+                        y,
+                        dim_fg.as_ptr(),
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+                y = y.saturating_add(1);
+            }
+        }
+
+        let config = match crafter.rule_editor_config.as_ref() {
+            Some(config) => config,
+            None => return,
+        };
+        y = y.saturating_add(1);
+        let total = RULE_EDITOR_FIELDS.len();
+        let max_rows = max_y.saturating_sub(y) as usize;
+        if max_rows > 0 {
+            let selected = crafter.rule_editor_index.min(total.saturating_sub(1));
+            let start = if selected >= max_rows {
+                selected + 1 - max_rows
+            } else {
+                0
+            };
+            for (idx, field) in RULE_EDITOR_FIELDS
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(max_rows)
+            {
+                let row_y = y.saturating_add((idx - start) as u32);
+                if row_y >= max_y {
+                    break;
+                }
+                let is_selected = idx == selected;
+                let value = rule_editor_value_label(config, *field);
+                let line = format!("{:<20} {}", field.label, value);
+                if is_selected {
+                    let fill_width = width.saturating_sub(2);
+                    unsafe {
+                        ot::bufferFillRect(buffer, 1, row_y, fill_width, 1, highlight_bg.as_ptr())
+                    };
+                }
+                unsafe {
+                    ot::bufferDrawText(
+                        buffer,
+                        line.as_bytes().as_ptr(),
+                        line.len(),
+                        2,
+                        row_y,
+                        if is_selected { fg.as_ptr() } else { dim_fg.as_ptr() },
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+            }
+        }
+        return;
+    }
 
     if crafter.show_config_menu {
         let menu_header = "=== SETTINGS ===";
@@ -2364,11 +3669,29 @@ pub fn draw_list(
             );
         }
         let mut y = y_start + 1;
-        for (i, (name, _, req)) in CRAFT_ITEMS.iter().enumerate() {
+        let craft_indices = craft_menu_indices(crafter);
+        if craft_indices.is_empty() {
+            let line = "Nothing craftable (need resources)";
+            unsafe {
+                ot::bufferDrawText(
+                    buffer,
+                    line.as_bytes().as_ptr(),
+                    line.len(),
+                    2,
+                    y,
+                    dim_fg.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                );
+            }
+            return;
+        }
+        for (row, &idx) in craft_indices.iter().enumerate() {
             if y >= max_y {
                 break;
             }
-            let is_selected = i == crafter.craft_selection;
+            let (name, _, req) = CRAFT_ITEMS[idx];
+            let is_selected = row == crafter.craft_selection;
             let line = format!("{} - {}", name, req);
             if is_selected {
                 let fill_width = width.saturating_sub(2);
@@ -2637,6 +3960,7 @@ pub fn draw_detail(
     }
     let fg = [0.78, 0.81, 0.86, 1.0];
     let dim_fg = [0.5, 0.52, 0.55, 1.0];
+    let green = [0.2, 0.8, 0.2, 1.0];
     let x = list_width.saturating_add(4);
     let max_y = height.saturating_sub(4);
     let mut y = 5;
@@ -2704,7 +4028,10 @@ pub fn draw_detail(
             y = y.saturating_add(1);
             let max_row_height = visible
                 .iter()
-                .map(|preview| (preview.height / 2).max(1))
+                .map(|preview| {
+                    let text_lines = if preview.detail.is_some() { 2 } else { 1 };
+                    (preview.height / 2).max(text_lines)
+                })
                 .max()
                 .unwrap_or(1);
             let max_rows = ((max_y.saturating_sub(y)) / max_row_height)
@@ -2715,13 +4042,13 @@ pub fn draw_detail(
                     break;
                 }
                 let mut label_x = x;
-                let mut row_height = 1u32;
+                let mut row_height = if preview.detail.is_some() { 2 } else { 1 };
                 if let Some(ref rgba) = preview.rgba {
                     if preview.width > 0 && preview.height > 0 {
                         let cells_w = preview.width / 2;
                         let cells_h = preview.height / 2;
                         let bytes_per_row = preview.width * 4;
-                        row_height = cells_h.max(1);
+                        row_height = row_height.max(cells_h.max(1));
                         unsafe {
                             let icon_buffer = ot::createOptimizedBuffer(cells_w, cells_h, false);
                             if !icon_buffer.is_null() {
@@ -2750,7 +4077,7 @@ pub fn draw_detail(
                         label_x = x.saturating_add(cells_w.saturating_add(1));
                     }
                 }
-                let label_y = y.saturating_add(row_height / 2);
+                let label_y = y;
                 if label_y >= max_y {
                     break;
                 }
@@ -2765,6 +4092,23 @@ pub fn draw_detail(
                         std::ptr::null(),
                         0,
                     );
+                }
+                if let Some(ref detail) = preview.detail {
+                    let detail_y = y.saturating_add(1);
+                    if detail_y < max_y {
+                        unsafe {
+                            ot::bufferDrawText(
+                                buffer,
+                                detail.as_bytes().as_ptr(),
+                                detail.len(),
+                                label_x,
+                                detail_y,
+                                dim_fg.as_ptr(),
+                                std::ptr::null(),
+                                0,
+                            );
+                        }
+                    }
                 }
                 y = y.saturating_add(row_height);
                 if idx + 1 == max_rows && visible.len() > max_rows && y < max_y {
@@ -2789,87 +4133,185 @@ pub fn draw_detail(
     }
 
     y = y.saturating_add(1);
+    let inv = &crafter.inventory;
+    let inv_lines = [
+        format!("Wood: {}  Stone: {}  Coal: {}", inv.wood, inv.stone, inv.coal),
+        format!(
+            "Iron: {}  Diamond: {}  Sapling: {}",
+            inv.iron, inv.diamond, inv.sapling
+        ),
+        format!("Sapphire: {}  Ruby: {}", inv.sapphire, inv.ruby),
+        format!(
+            "Pickaxe: W{} S{} I{} D{}",
+            inv.wood_pickaxe, inv.stone_pickaxe, inv.iron_pickaxe, inv.diamond_pickaxe
+        ),
+        format!(
+            "Sword: W{} S{} I{} D{}",
+            inv.wood_sword, inv.stone_sword, inv.iron_sword, inv.diamond_sword
+        ),
+        format!("Bow: {}  Arrows: {}", inv.bow, inv.arrows),
+        format!(
+            "Armor: H{} C{} L{} B{}",
+            inv.armor_helmet,
+            inv.armor_chestplate,
+            inv.armor_leggings,
+            inv.armor_boots
+        ),
+        format!(
+            "Potions: R{} G{} B{} P{} C{} Y{}",
+            inv.potion_red,
+            inv.potion_green,
+            inv.potion_blue,
+            inv.potion_pink,
+            inv.potion_cyan,
+            inv.potion_yellow
+        ),
+        format!("XP: {}  Level: {}  SP: {}", inv.xp, inv.level, inv.stat_points),
+    ];
+
     if y < max_y {
-        let inv_header = "Inventory";
-        unsafe {
-            ot::bufferDrawText(
-                buffer,
-                inv_header.as_bytes().as_ptr(),
-                inv_header.len(),
-                x,
-                y,
-                fg.as_ptr(),
-                std::ptr::null(),
-                0,
-            );
-        }
-        y = y.saturating_add(1);
+        if !crafter.density_lines.is_empty() {
+            let detail_width = width.saturating_sub(x.saturating_add(2));
+            let col_width = (detail_width / 2).max(20);
+            let right_x = x.saturating_add(col_width.saturating_add(2));
+            let start_y = y;
 
-        let inv = &crafter.inventory;
-        let inv_lines = [
-            format!("Wood: {}  Stone: {}  Coal: {}", inv.wood, inv.stone, inv.coal),
-            format!(
-                "Iron: {}  Diamond: {}  Sapling: {}",
-                inv.iron, inv.diamond, inv.sapling
-            ),
-            format!(
-                "Sapphire: {}  Ruby: {}",
-                inv.sapphire, inv.ruby
-            ),
-            format!(
-                "Pickaxe: W{} S{} I{} D{}",
-                inv.wood_pickaxe, inv.stone_pickaxe, inv.iron_pickaxe, inv.diamond_pickaxe
-            ),
-            format!(
-                "Sword: W{} S{} I{} D{}",
-                inv.wood_sword, inv.stone_sword, inv.iron_sword, inv.diamond_sword
-            ),
-            format!("Bow: {}  Arrows: {}", inv.bow, inv.arrows),
-            format!(
-                "Armor: H{} C{} L{} B{}",
-                inv.armor_helmet,
-                inv.armor_chestplate,
-                inv.armor_leggings,
-                inv.armor_boots
-            ),
-            format!(
-                "Potions: R{} G{} B{} P{} C{} Y{}",
-                inv.potion_red,
-                inv.potion_green,
-                inv.potion_blue,
-                inv.potion_pink,
-                inv.potion_cyan,
-                inv.potion_yellow
-            ),
-            format!("XP: {}  Level: {}  SP: {}", inv.xp, inv.level, inv.stat_points),
-        ];
-
-        for line in inv_lines {
-            if y >= max_y {
-                break;
-            }
+            let mut left_y = start_y;
+            let header = "Map Density";
             unsafe {
                 ot::bufferDrawText(
                     buffer,
-                    line.as_bytes().as_ptr(),
-                    line.len(),
+                    header.as_bytes().as_ptr(),
+                    header.len(),
+                    x,
+                    left_y,
+                    fg.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                );
+            }
+            left_y = left_y.saturating_add(1);
+            for line in crafter.density_lines.iter() {
+                if left_y >= max_y {
+                    break;
+                }
+                unsafe {
+                    ot::bufferDrawText(
+                        buffer,
+                        line.as_bytes().as_ptr(),
+                        line.len(),
+                        x,
+                        left_y,
+                        dim_fg.as_ptr(),
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+                left_y = left_y.saturating_add(1);
+            }
+
+            let mut right_y = start_y;
+            let inv_header = "Inventory";
+            unsafe {
+                ot::bufferDrawText(
+                    buffer,
+                    inv_header.as_bytes().as_ptr(),
+                    inv_header.len(),
+                    right_x,
+                    right_y,
+                    fg.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                );
+            }
+            right_y = right_y.saturating_add(1);
+            for line in inv_lines {
+                if right_y >= max_y {
+                    break;
+                }
+                unsafe {
+                    ot::bufferDrawText(
+                        buffer,
+                        line.as_bytes().as_ptr(),
+                        line.len(),
+                        right_x,
+                        right_y,
+                        dim_fg.as_ptr(),
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+                right_y = right_y.saturating_add(1);
+            }
+
+            let used = left_y.max(right_y);
+            y = used.saturating_add(1);
+        } else {
+            let inv_header = "Inventory";
+            unsafe {
+                ot::bufferDrawText(
+                    buffer,
+                    inv_header.as_bytes().as_ptr(),
+                    inv_header.len(),
                     x,
                     y,
-                    dim_fg.as_ptr(),
+                    fg.as_ptr(),
                     std::ptr::null(),
                     0,
                 );
             }
             y = y.saturating_add(1);
+            for line in inv_lines {
+                if y >= max_y {
+                    break;
+                }
+                unsafe {
+                    ot::bufferDrawText(
+                        buffer,
+                        line.as_bytes().as_ptr(),
+                        line.len(),
+                        x,
+                        y,
+                        dim_fg.as_ptr(),
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+                y = y.saturating_add(1);
+            }
+            y = y.saturating_add(1);
         }
     }
 
-    y = y.saturating_add(1);
-    let legend_limit_y = if crafter.achievements.is_empty() {
-        max_y
+    let craftax_enabled = load_session_config(&crafter.config)
+        .map(|config| config.craftax.enabled && config.craftax.achievements_enabled)
+        .unwrap_or(false);
+    let all_achievements = if craftax_enabled {
+        Achievements::all_names_with_craftax()
     } else {
-        max_y.saturating_sub(8)
+        Achievements::all_names().to_vec()
     };
+    let achievements_header =
+        format!("Achievements ({}/{})", crafter.achievements.len(), all_achievements.len());
+    let achievements_max_len = all_achievements
+        .iter()
+        .map(|ach| ach.len())
+        .max()
+        .unwrap_or(0)
+        .max(achievements_header.len()) as u32;
+    let achievements_col_width = achievements_max_len.saturating_add(2).max(12);
+    let achievements_available_width = width.saturating_sub(x + 2);
+    let achievements_columns = (achievements_available_width / achievements_col_width)
+        .max(1)
+        .min(3) as usize;
+    let achievements_rows =
+        (all_achievements.len() + achievements_columns - 1) / achievements_columns;
+    let achievements_block_height = 1 + achievements_rows as u32;
+    let events_block_height = if crafter.events.is_empty() { 0 } else { 1 + 1 + 3 };
+
+    y = y.saturating_add(1);
+    let reserved_after_legend = 1 + achievements_block_height + events_block_height;
+    let legend_limit_y = max_y.saturating_sub(reserved_after_legend);
     if y < legend_limit_y {
         let legend_y_start = y;
         let legend_header = "Map Legend";
@@ -2950,7 +4392,7 @@ pub fn draw_detail(
             }
         }
 
-        y = legend_y_start.saturating_add(legend_rows as u32);
+        let legend_bottom = legend_y_start.saturating_add(legend_rows as u32);
 
         let action_x = x.saturating_add(legend_col_width * legend_columns as u32 + 4);
         let action_header = "Action Legend";
@@ -2962,7 +4404,16 @@ pub fn draw_detail(
             "R = Place stone",
             "F = Place furnace",
             "P = Place plant",
-            "T (menu) = Craft",
+            "C = Craft menu (table)",
+            "1 = Wood pickaxe",
+            "2 = Stone pickaxe",
+            "3 = Iron pickaxe",
+            "4 = Wood sword",
+            "5 = Stone sword",
+            "6 = Iron sword",
+            "7 = Diamond pickaxe",
+            "8 = Diamond sword",
+            "9 = Diamond armor",
             "G = Shoot arrow",
             "Q/E/Y/U/I/O = Drink potions",
         ];
@@ -2982,7 +4433,7 @@ pub fn draw_detail(
             }
             action_y = action_y.saturating_add(1);
             for action in action_items {
-                if action_y >= legend_limit_y {
+                if action_y >= legend_bottom {
                     break;
                 }
                 unsafe {
@@ -3000,16 +4451,16 @@ pub fn draw_detail(
                 action_y = action_y.saturating_add(1);
             }
         }
+        y = legend_bottom;
     }
 
     y = y.saturating_add(1);
-    if y < max_y && !crafter.achievements.is_empty() {
-        let header = "Achievements";
+    if y < max_y {
         unsafe {
             ot::bufferDrawText(
                 buffer,
-                header.as_bytes().as_ptr(),
-                header.len(),
+                achievements_header.as_bytes().as_ptr(),
+                achievements_header.len(),
                 x,
                 y,
                 fg.as_ptr(),
@@ -3019,32 +4470,26 @@ pub fn draw_detail(
         }
         y = y.saturating_add(1);
 
-        let max_len = crafter
-            .achievements
-            .iter()
-            .map(|ach| ach.len())
-            .max()
-            .unwrap_or(0)
-            .max(header.len()) as u32;
-        let col_width = max_len.saturating_add(2).max(12);
-        let available_width = width.saturating_sub(x + 2);
-        let columns = (available_width / col_width).max(1).min(2) as usize;
-        let max_rows = 6usize.min(max_y.saturating_sub(y) as usize);
-        let rows = (crafter.achievements.len() + columns - 1) / columns;
-        let rows = rows.min(max_rows);
+        let unlocked: HashSet<&str> = crafter.achievements.iter().map(|ach| ach.as_str()).collect();
+        let rows = achievements_rows;
 
         for row in 0..rows {
             let row_y = y + row as u32;
             if row_y >= max_y {
                 break;
             }
-            for col in 0..columns {
+            for col in 0..achievements_columns {
                 let idx = col * rows + row;
-                if idx >= crafter.achievements.len() {
+                if idx >= all_achievements.len() {
                     break;
                 }
-                let ach = &crafter.achievements[idx];
-                let col_x = x + (col as u32 * col_width);
+                let ach = all_achievements[idx];
+                let col_x = x + (col as u32 * achievements_col_width);
+                let color = if unlocked.contains(ach) {
+                    green.as_ptr()
+                } else {
+                    dim_fg.as_ptr()
+                };
                 unsafe {
                     ot::bufferDrawText(
                         buffer,
@@ -3052,7 +4497,7 @@ pub fn draw_detail(
                         ach.len(),
                         col_x,
                         row_y,
-                        dim_fg.as_ptr(),
+                        color,
                         std::ptr::null(),
                         0,
                     );
@@ -3060,24 +4505,6 @@ pub fn draw_detail(
             }
         }
         y = y.saturating_add(rows as u32);
-        let shown = rows * columns;
-        if crafter.achievements.len() > shown && y < max_y {
-            let remaining = crafter.achievements.len() - shown;
-            let more_line = format!("... +{} more", remaining);
-            unsafe {
-                ot::bufferDrawText(
-                    buffer,
-                    more_line.as_bytes().as_ptr(),
-                    more_line.len(),
-                    x,
-                    y,
-                    dim_fg.as_ptr(),
-                    std::ptr::null(),
-                    0,
-                );
-            }
-            y = y.saturating_add(1);
-        }
     }
 
     y = y.saturating_add(1);
@@ -3119,7 +4546,10 @@ pub fn draw_detail(
 }
 
 pub fn action_hint(crafter: &CrafterState) -> String {
-    if crafter.show_config_menu {
+    if crafter.show_rule_editor {
+        "[Up/Down] Select  [Left/Right] Adjust  [Enter] Toggle  [S] Save  [Esc] Back"
+            .to_string()
+    } else if crafter.show_config_menu {
         "[Up/Down] Select  [Left/Right] Adjust  [N] New  [Y] New YAML  [E] Edit  [D] Delete  [Enter] Start  [Esc] Back"
             .to_string()
     } else if crafter.show_craft_menu || crafter.show_place_menu {
@@ -3128,8 +4558,10 @@ pub fn action_hint(crafter: &CrafterState) -> String {
         "[Up/Down] Select  [Enter] Replay  [/] Search  [C] New game  [Esc] Back".to_string()
     } else if crafter.replay_active {
         "[P] Pause  [B] Branch  [X/Esc] Stop replay  [C] New game".to_string()
+    } else if crafter.running && crafter.paused {
+        "[P] Resume  [Backspace] Delete session  [R] Reset  [L] Recordings".to_string()
     } else if crafter.input_capture {
-        "[WASD] Move  [Space] Interact  [Tab] Sleep  [T/R/F/P] Place  [1-6] Craft  [G] Shoot  [Q/E/Y/U/I/O] Potions  [Esc] Release"
+        "[WASD] Move  [Space] Interact  [Tab] Sleep  [T/R/F/P] Place  [C] Craft menu  [1-9] Quick craft  [G] Shoot  [Q/E/Y/U/I/O] Potions  [Esc] Release"
             .to_string()
     } else if crafter.running {
         "[C] Capture input  [P] Pause  [R] Reset  [L] Recordings".to_string()

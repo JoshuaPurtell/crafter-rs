@@ -225,6 +225,7 @@ impl Player {
         hunger_enabled: bool,
         thirst_enabled: bool,
         fatigue_enabled: bool,
+        health_enabled: bool,
         hunger_rate: f32,
         thirst_rate: f32,
     ) {
@@ -271,6 +272,13 @@ impl Player {
                 self.fatigue_counter = 0;
                 self.inventory.add_energy(1);
             }
+        }
+
+        if !health_enabled {
+            self.recover_counter = 0.0;
+            self.inventory.health = crate::inventory::MAX_INVENTORY_VALUE;
+            self.last_health = self.inventory.health;
+            return;
         }
 
         // Health recovery or damage from depletion

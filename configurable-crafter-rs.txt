@@ -1,6 +1,5 @@
 Configurable Crafter-RS: Review + Proposal
 =========================================
-
 Scope
 - Review customizability patterns in ContinualLearningBench (CLB)
 - Review current customizability in crafter-rs

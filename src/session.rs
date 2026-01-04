@@ -190,11 +190,7 @@ impl Session {
             player_facing: player.map(|p| p.facing).unwrap_or((0, 1)),
             player_sleeping: player.map(|p| p.sleeping).unwrap_or(false),
             daylight: self.world.daylight,
-            view: if !self.config.full_world_state {
-                player.map(|p| self.world.get_view(p.pos, self.config.view_radius))
-            } else {
-                None
-            },
+            view: player.map(|p| self.world.get_view(p.pos, self.config.view_radius)),
             world: if self.config.full_world_state {
                 Some(self.world.clone())
             } else {
@@ -391,6 +387,7 @@ impl Session {
                 self.config.hunger_enabled,
                 self.config.thirst_enabled,
                 self.config.fatigue_enabled,
+                self.config.health_enabled,
                 self.config.hunger_rate as f32,
                 self.config.thirst_rate as f32,
             );
@@ -545,9 +542,11 @@ impl Session {
                 // Check for lava death (player dies instantly on lava)
                 if let Some(mat) = self.world.get_material(new_pos) {
                     if mat.is_deadly() {
-                        if let Some(player) = self.world.get_player_mut() {
-                            player.last_damage_source = Some(DamageSource::Lava);
-                            player.inventory.health = 0;
+                        if self.config.health_enabled {
+                            if let Some(player) = self.world.get_player_mut() {
+                                player.last_damage_source = Some(DamageSource::Lava);
+                                player.inventory.health = 0;
+                            }
                         }
                     }
                 }
@@ -586,7 +585,11 @@ impl Session {
         base_damage: f32,
         sleeping_multiplier: f32,
         reduction: f32,
+        health_enabled: bool,
     ) {
+        if !health_enabled {
+            return;
+        }
         let mut damage = base_damage * sleeping_multiplier;
         let clamped = reduction.clamp(0.0, 0.9);
         damage *= 1.0 - clamped;
@@ -1480,6 +1483,7 @@ impl Session {
                         base_damage,
                         sleep_mult,
                         reduction,
+                        self.config.health_enabled,
                     );
                     if player_sleeping {
                         player.wake_up();
@@ -1665,6 +1669,7 @@ impl Session {
                         stats.melee_damage as f32,
                         sleep_mult,
                         reduction,
+                        self.config.health_enabled,
                     );
                     if player_sleeping {
                         player.wake_up();
@@ -1746,6 +1751,7 @@ impl Session {
                             arrow.damage as f32,
                             1.0,
                             reduction,
+                            self.config.health_enabled,
                         );
                         if p.sleeping {
                             p.wake_up();
@@ -2080,7 +2086,7 @@ impl Session {
     fn check_done(&self) -> (bool, Option<DoneReason>) {
         // Check player death
         if let Some(player) = self.world.get_player() {
-            if !player.is_alive() {
+            if self.config.health_enabled && !player.is_alive() {
                 return (true, Some(DoneReason::Death));
             }
         } else {
@@ -3017,6 +3023,41 @@ mod mechanics_tests {
 
         let health_after = session.get_state().inventory.health;
         assert!(health_after > initial_health, "Health should recover when vitals are full: {} -> {}", initial_health, health_after);
+    }
+
+    #[test]
+    fn test_health_disabled_prevents_damage() {
+        let config = SessionConfig {
+            world_size: (32, 32),
+            seed: Some(42),
+            hunger_enabled: true,
+            thirst_enabled: true,
+            fatigue_enabled: true,
+            health_enabled: false,
+            ..Default::default()
+        };
+
+        let mut session = Session::new(config);
+
+        if let Some(player) = session.world.get_player_mut() {
+            player.inventory.health = 3;
+            player.inventory.food = 0;
+            player.inventory.drink = 0;
+            player.inventory.energy = 0;
+            player.recover_counter = -14.0;
+        }
+
+        for _ in 0..5 {
+            session.step(Action::Noop);
+        }
+
+        let health_after = session.get_state().inventory.health;
+        assert_eq!(
+            health_after,
+            crate::inventory::MAX_INVENTORY_VALUE,
+            "Health should stay maxed when disabled: {}",
+            health_after
+        );
     }
 
     #[test]
