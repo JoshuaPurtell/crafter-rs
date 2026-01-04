@@ -3,7 +3,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crafter_core::image_renderer::{ImageRenderer, ImageRendererConfig};
 use crafter_core::recording::{Recording, RecordingOptions, RecordingSession, ReplaySession};
 use crafter_core::{Achievements, GameObject, Material, SaveData};
@@ -266,6 +266,8 @@ pub struct CrafterConfig {
     pub tick_rate: u32,      // Hz (1-30) - only used in real-time mode
     pub world_width: u32,    // 16-64
     pub world_height: u32,   // 16-64
+    #[serde(default = "default_view_size")]
+    pub view_size: u32,      // odd sizes like 7, 9, 11
     pub random_seed: bool,   // true = random, false = fixed
     pub seed: u64,           // fixed seed value
     pub graphics_mode: bool, // true = pixel graphics, false = ASCII
@@ -280,6 +282,7 @@ impl Default for CrafterConfig {
             tick_rate: 10,
             world_width: 64,
             world_height: 64,
+            view_size: default_view_size(),
             random_seed: true,
             seed: 42,
             graphics_mode: true,
@@ -293,6 +296,36 @@ fn default_rule_config_name() -> String {
     "classic".to_string()
 }
 
+fn default_view_size() -> u32 {
+    7
+}
+
+fn view_radius_from_size(view_size: u32) -> u32 {
+    let size = if view_size % 2 == 1 { view_size } else { view_size.saturating_sub(1).max(3) };
+    size.saturating_sub(1) / 2
+}
+
+fn step_view_size(current: u32, delta: i32) -> u32 {
+    const VIEW_SIZES: &[u32] = &[5, 7, 9, 11, 13];
+    let mut idx = VIEW_SIZES
+        .iter()
+        .position(|&v| v == current)
+        .unwrap_or_else(|| VIEW_SIZES.iter().position(|&v| v > current).unwrap_or(VIEW_SIZES.len() - 1));
+    if delta.is_positive() {
+        idx = (idx + 1).min(VIEW_SIZES.len().saturating_sub(1));
+    } else if idx > 0 {
+        idx -= 1;
+    }
+    VIEW_SIZES[idx]
+}
+
+fn tile_size_for_view_size(view_size: u32) -> u32 {
+    let target_width = 70u32;
+    let size = view_size.max(1);
+    let tile = target_width / size;
+    tile.clamp(4, 16)
+}
+
 /// Config menu items
 pub const CONFIG_ITEMS: &[&str] = &[
     "Profile",        // 0: profile name
@@ -301,10 +334,11 @@ pub const CONFIG_ITEMS: &[&str] = &[
     "Tick Rate",      // 3: Hz (only for real-time)
     "World Width",    // 4
     "World Height",   // 5
-    "Seed Mode",      // 6
-    "Seed Value",     // 7
-    "Graphics Mode",  // 8
-    "--- Start Game ---",  // 9
+    "View Size",      // 6 (odd sizes like 7x7)
+    "Seed Mode",      // 7
+    "Seed Value",     // 8
+    "Graphics Mode",  // 9
+    "--- Start Game ---",  // 10
 ];
 
 impl CrafterState {
@@ -1734,6 +1768,7 @@ pub fn spawn_crafter_loop(
                         frame_height = game_config.world_height.clamp(16, 64);
                         graphics_mode = game_config.graphics_mode;
                         logical_time = game_config.logical_time;
+                        tile_size = tile_size_for_view_size(game_config.view_size);
 
                         let seed = if game_config.random_seed {
                             None
@@ -1746,14 +1781,14 @@ pub fn spawn_crafter_loop(
                             SessionConfig {
                                 world_size: (frame_width, frame_height),
                                 seed,
-                                view_radius: 3,
+                                view_radius: view_radius_from_size(game_config.view_size),
                                 ..Default::default()
                             }
                         });
                         let session_config = SessionConfig {
                             world_size: (frame_width, frame_height),
                             seed,
-                            view_radius: 3,
+                            view_radius: view_radius_from_size(game_config.view_size),
                             full_world_state: true,
                             time_mode: if logical_time {
                                 crafter_core::TimeMode::Logical
@@ -1914,7 +1949,7 @@ pub fn spawn_crafter_loop(
                         let config = SessionConfig {
                             world_size: (frame_width, frame_height),
                             seed: current_seed,
-                            view_radius: 3,
+                            view_radius: view_radius_from_size(crafter.config.view_size),
                             full_world_state: true,
                             ..Default::default()
                         };
@@ -2668,7 +2703,7 @@ fn map_density_lines(state: &crafter_core::GameState) -> Vec<String> {
 
 fn render_state_graphics(
     state: &crafter_core::GameState,
-    _tile_size: u32,
+    tile_size: u32,
 ) -> (Vec<u8>, u32, u32, u32, u32) {
     let view = match &state.view {
         Some(v) => v,
@@ -2676,8 +2711,6 @@ fn render_state_graphics(
     };
 
     let view_size = view.size() as u32;
-    let tile_size = 10u32;
-
     let config = ImageRendererConfig {
         tile_size,
         show_status_bars: true,
@@ -2968,9 +3001,10 @@ pub fn handle_key(
                         crafter.config.world_height =
                             crafter.config.world_height.saturating_sub(4).max(16);
                     }
-                    6 => crafter.config.random_seed = !crafter.config.random_seed,
-                    7 => crafter.config.seed = crafter.config.seed.saturating_sub(1),
-                    8 => {
+                    6 => crafter.config.view_size = step_view_size(crafter.config.view_size, -1),
+                    7 => crafter.config.random_seed = !crafter.config.random_seed,
+                    8 => crafter.config.seed = crafter.config.seed.saturating_sub(1),
+                    9 => {
                         crafter.config.graphics_mode = !crafter.config.graphics_mode;
                         graphics_mode_update = Some(crafter.config.graphics_mode);
                     }
@@ -3003,9 +3037,10 @@ pub fn handle_key(
                     4 => crafter.config.world_width = (crafter.config.world_width + 4).min(64),
                     5 => crafter.config.world_height =
                         crafter.config.world_height.saturating_add(4).min(64),
-                    6 => crafter.config.random_seed = !crafter.config.random_seed,
-                    7 => crafter.config.seed = crafter.config.seed.saturating_add(1),
-                    8 => {
+                    6 => crafter.config.view_size = step_view_size(crafter.config.view_size, 1),
+                    7 => crafter.config.random_seed = !crafter.config.random_seed,
+                    8 => crafter.config.seed = crafter.config.seed.saturating_add(1),
+                    9 => {
                         crafter.config.graphics_mode = !crafter.config.graphics_mode;
                         graphics_mode_update = Some(crafter.config.graphics_mode);
                     }
@@ -3086,6 +3121,28 @@ pub fn handle_key(
         };
         return CrafterKeyOutcome {
             handled,
+            graphics_mode_update,
+        };
+    }
+
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if crafter.running {
+            let _ = cmd_tx.send(CrafterCommand::Stop);
+            crafter.input_capture = false;
+        }
+        return CrafterKeyOutcome {
+            handled: true,
+            graphics_mode_update,
+        };
+    }
+
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if crafter.running {
+            let _ = cmd_tx.send(CrafterCommand::StopAndDiscard);
+            crafter.input_capture = false;
+        }
+        return CrafterKeyOutcome {
+            handled: true,
             graphics_mode_update,
         };
     }
@@ -3350,7 +3407,8 @@ pub fn drain_updates(crafter: &mut CrafterState, rx: &Receiver<CrafterUpdate>) {
                 crafter.frame_width = rgba_width;
                 crafter.frame_height = rgba_height;
                 if rgba_width > 0 {
-                    crafter.last_tile_size = rgba_width / 7;
+                    let view_size = crafter.config.view_size.max(1);
+                    crafter.last_tile_size = rgba_width / view_size;
                 }
                 crafter.score = score;
                 crafter.health = health;
@@ -3610,7 +3668,8 @@ pub fn draw_list(
                 3 => format!("{}: {} Hz", label, crafter.config.tick_rate),
                 4 => format!("{}: {}", label, crafter.config.world_width),
                 5 => format!("{}: {}", label, crafter.config.world_height),
-                6 => format!(
+                6 => format!("{}: {}x{}", label, crafter.config.view_size, crafter.config.view_size),
+                7 => format!(
                     "{}: {}",
                     label,
                     if crafter.config.random_seed {
@@ -3619,8 +3678,8 @@ pub fn draw_list(
                         "Fixed"
                     }
                 ),
-                7 => format!("{}: {}", label, crafter.config.seed),
-                8 => format!(
+                8 => format!("{}: {}", label, crafter.config.seed),
+                9 => format!(
                     "{}: {}",
                     label,
                     if crafter.config.graphics_mode {
@@ -4559,12 +4618,14 @@ pub fn action_hint(crafter: &CrafterState) -> String {
     } else if crafter.replay_active {
         "[P] Pause  [B] Branch  [X/Esc] Stop replay  [C] New game".to_string()
     } else if crafter.running && crafter.paused {
-        "[P] Resume  [Backspace] Delete session  [R] Reset  [L] Recordings".to_string()
+        "[P] Resume  [Ctrl+S] Stop & save  [Backspace] Delete session  [Ctrl+C] End session  [R] Reset  [L] Recordings"
+            .to_string()
     } else if crafter.input_capture {
-        "[WASD] Move  [Space] Interact  [Tab] Sleep  [T/R/F/P] Place  [C] Craft menu  [1-9] Quick craft  [G] Shoot  [Q/E/Y/U/I/O] Potions  [Esc] Release"
+        "[WASD] Move  [Space] Interact  [Tab] Sleep  [T/R/F/P] Place  [C] Craft menu  [1-9] Quick craft  [G] Shoot  [Q/E/Y/U/I/O] Potions  [Ctrl+S] Stop & save  [Ctrl+C] End session  [Esc] Release"
             .to_string()
     } else if crafter.running {
-        "[C] Capture input  [P] Pause  [R] Reset  [L] Recordings".to_string()
+        "[C] Capture input  [P] Pause  [Ctrl+S] Stop & save  [Ctrl+C] End session  [R] Reset  [L] Recordings"
+            .to_string()
     } else {
         "[S] Settings  [C] Start  [L] Recordings".to_string()
     }
