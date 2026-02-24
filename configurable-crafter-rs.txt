@@ -83,7 +83,7 @@ B) Session create API (for agents + external clients)
     - `config_inline: Option<GameConfig>` or `config_toml: Option<String>`
   - Or introduce a dedicated creation endpoint:
     - `create_session(config_name | config_inline) -> session_id`
-- Keep backward compatibility by defaulting to classic preset when no config is provided.
+- Keep compatibility removed by defaulting to classic preset when no config is provided.
 - Enforce that any non-classic behavior only activates via explicit config flags.
 - Return config metadata in SnapshotResponse (mode, config_name, seed).
 
